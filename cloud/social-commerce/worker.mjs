@@ -50,7 +50,7 @@ async function handle(request,env) {
   return json({service:"Alpha Centauri Social Commerce Cloud API",status:"online",mode:"cloud",setup_ready:setup,admin_initialized:(users?.n||0)>0,publishing_enabled:false,platforms:Object.fromEntries(PLATFORMS.map(p=>[p,"oauth_not_configured"]))},200,cors(request));
  }
  if(method==="POST" && path==="/auth/bootstrap") {
-  if(!env.BOOTSTRAP_KEY || request.headers.get("X-Bootstrap-Key")!==env.BOOTSTRAP_KEY) return json({error:"Invalid bootstrap key"},403,cors(request));
+  if(!env.BOOTSTRAP_KEY || (request.headers.get("Authorization")||"").replace(/^Bootstrap\\s+/i,"")!==env.BOOTSTRAP_KEY) return json({error:"Invalid bootstrap key"},403,cors(request));
   const count=await env.DB.prepare("SELECT COUNT(*) n FROM app_users").first();
   if(count.n>0) return json({error:"Initial administrator already exists"},409,cors(request));
   const body=await request.json();
