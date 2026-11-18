@@ -8,7 +8,7 @@ const random = (n=32) => { const a=new Uint8Array(n); crypto.getRandomValues(a);
 const sha = async (v) => b64(await crypto.subtle.digest("SHA-256",new TextEncoder().encode(v)));
 const cors = (request) => {
  const origin=request.headers.get("Origin")||"";
- const headers={"Access-Control-Allow-Methods":"GET,POST,DELETE,OPTIONS","Access-Control-Allow-Headers":"Authorization,Content-Type","Vary":"Origin"};
+ const headers={"Access-Control-Allow-Methods":"GET,POST,DELETE,OPTIONS","Access-Control-Allow-Headers":"Authorization,Content-Type,X-Bootstrap-Key","Vary":"Origin"};
  if(origin===ORIGIN) headers["Access-Control-Allow-Origin"]=origin;
  return headers;
 };
