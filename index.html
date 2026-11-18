@@ -112,7 +112,8 @@
                 text-orientation: mixed;
                 white-space: nowrap;
             }
-            .workspace-panel.is-collapsed .panel-heading p { display: none; }
+            .workspace-panel.is-collapsed .panel-heading p,
+            .workspace-panel.is-collapsed .panel-header-content { display: none !important; }
             .workspace-panel.is-collapsed .panel-heading h2 { font-size: 12px; }
             .workspace-panel.is-collapsed .panel-header-top .panel-heading-icon { display: none; }
             .workspace-panel.is-collapsed .panel-collapse-icon { transform: rotate(180deg); }
@@ -492,7 +493,7 @@
                     </div>
                 </div>
                 <!-- Filter Pills -->
-                <div class="flex gap-1 overflow-x-auto pb-1">
+                <div class="panel-header-content flex gap-1 overflow-x-auto pb-1">
                     <button onclick="setLogFilter('ALL')" id="filter-ALL" class="filter-btn px-2.5 py-1 rounded-lg text-[11px] bg-sky-500/20 text-sky-300 border border-sky-500/40 font-medium">ทั้งหมด</button>
                     <button onclick="setLogFilter('DEV')" id="filter-DEV" class="filter-btn px-2.5 py-1 rounded-lg text-[11px] bg-space-950 text-slate-400 border border-slate-800 hover:text-white">ทีม Dev</button>
                     <button onclick="setLogFilter('MEDIA')" id="filter-MEDIA" class="filter-btn px-2.5 py-1 rounded-lg text-[11px] bg-space-950 text-slate-400 border border-slate-800 hover:text-white">ทีม Media</button>
@@ -820,7 +821,7 @@
                     icon.setAttribute('data-lucide', side === 'left'
                         ? (collapsed ? 'panel-left-open' : 'panel-left-close')
                         : (collapsed ? 'panel-right-open' : 'panel-right-close'));
-                    lucide.createIcons({ nodes: [icon] });
+                    lucide.createIcons({ root: panel });
                 }
             }
             try { localStorage.setItem('alpha-centauri-panel-' + side, collapsed ? 'collapsed' : 'expanded'); } catch (_) {}
