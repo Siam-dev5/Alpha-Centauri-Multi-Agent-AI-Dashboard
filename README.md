@@ -28,3 +28,7 @@ Keep API keys in the local `.env` file. Never commit secrets or expose the local
 ## Current scope
 
 V1.0 provides the dashboard foundation, 18 character assets, a local FastAPI gateway, provider adapters, and real-time WebSocket events. Full Master Bot task decomposition, worker tools, durable queue/state, approval workflows, and deployment integrations are planned for subsequent phases. Simulation is a UI demo and is not evidence that external actions occurred.
+
+## Enable GitHub Pages (one-time owner action)
+
+Open **Settings → Pages** for this repository and set **Build and deployment → Source** to **GitHub Actions**. This is a one-time repository setting. After it is enabled, pushes to `main` that change `index.html` or the Pages workflow deploy the static Dashboard automatically. Expected site URL: `https://siam-dev5.github.io/Alpha-Centauri-Multi-Agent-AI-Dashboard/`.
