@@ -88,8 +88,50 @@
             animation: dashFlow 0.8s linear infinite;
         }
 
+        /* Living AI nodes: soft breathing, floating characters and energy pulses. */
+        @keyframes botAuraBreathe {
+            0%, 100% { opacity: .48; stroke-width: 1; }
+            50% { opacity: .95; stroke-width: 2.4; }
+        }
+        @keyframes characterFloat {
+            0%, 100% { transform: translateY(0) scale(1); }
+            50% { transform: translateY(-2.6px) scale(1.035); }
+        }
+        @keyframes masterCorePulse {
+            0%, 100% { opacity: .35; }
+            50% { opacity: .85; }
+        }
+        @keyframes selectionOrbit {
+            to { stroke-dashoffset: -28; }
+        }
+        .bot-aura-breathe {
+            animation: botAuraBreathe 2.8s ease-in-out infinite;
+        }
+        .character-float {
+            transform-box: fill-box;
+            transform-origin: center bottom;
+            animation: characterFloat 2.2s ease-in-out infinite;
+        }
+        .master-core-pulse {
+            animation: masterCorePulse 2.4s ease-in-out infinite;
+        }
+        .selection-orbit {
+            animation: selectionOrbit 4s linear infinite;
+        }
+        .energy-particle {
+            fill: #67e8f9;
+            filter: drop-shadow(0 0 3px #22d3ee);
+            pointer-events: none;
+        }
+        .energy-particle.is-active {
+            fill: #fbbf24;
+            filter: drop-shadow(0 0 5px #f59e0b);
+        }
+
         @media (prefers-reduced-motion: reduce) {
-            .animate-pulse, .animate-ping, .animate-edge { animation: none !important; }
+            .animate-pulse, .animate-ping, .animate-edge,
+            .bot-aura-breathe, .character-float, .master-core-pulse,
+            .selection-orbit { animation: none !important; }
         }
         .pixelated {
             image-rendering: pixelated;
@@ -1303,6 +1345,14 @@
                     path.setAttribute('stroke-width', '1.2');
                 }
                 edgesLayer.appendChild(path);
+
+                const energy = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+                energy.setAttribute('r', isActive ? '3.2' : '1.9');
+                energy.setAttribute('class', isActive ? 'energy-particle is-active' : 'energy-particle');
+                energy.dataset.energyIndex = String(baseLinks.indexOf(link));
+                energy.dataset.from = link.from;
+                energy.dataset.to = link.to;
+                edgesLayer.appendChild(energy);
             });
 
             // Draw Agent Nodes
@@ -1326,6 +1376,7 @@
                 aura.setAttribute('cy', agent.y);
                 aura.setAttribute('r', agent.r + (agent.status !== 'IDLE' ? 11 : 6));
                 aura.setAttribute('fill', st.ring);
+                aura.setAttribute('class', 'bot-aura-breathe');
                 if (agent.status === 'TALKING' || agent.status === 'WORKING') {
                     aura.setAttribute('class', 'animate-pulse');
                 }
@@ -1341,6 +1392,7 @@
                     selRing.setAttribute('stroke', '#38bdf8');
                     selRing.setAttribute('stroke-width', '2.2');
                     selRing.setAttribute('stroke-dasharray', '4 3');
+                    selRing.setAttribute('class', 'selection-orbit');
                     g.appendChild(selRing);
                 }
 
@@ -1357,6 +1409,18 @@
                 }
                 g.appendChild(circle);
 
+                if (agent.id === 'master') {
+                    const corePulse = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+                    corePulse.setAttribute('cx', agent.x);
+                    corePulse.setAttribute('cy', agent.y);
+                    corePulse.setAttribute('r', agent.r + 5);
+                    corePulse.setAttribute('fill', 'none');
+                    corePulse.setAttribute('stroke', '#fbbf24');
+                    corePulse.setAttribute('stroke-width', '2');
+                    corePulse.setAttribute('class', 'master-core-pulse');
+                    g.appendChild(corePulse);
+                }
+
                 // Render Custom Character Sprite Inside the Star Node
                 if (spriteUrl) {
                     const spriteSize = agent.r * 2.25;
@@ -1368,7 +1432,11 @@
                     imgEl.setAttribute('height', spriteSize * 1.12);
                     imgEl.setAttribute('class', 'pixelated');
                     imgEl.setAttribute('pointer-events', 'none');
-                    g.appendChild(imgEl);
+                    const characterMotion = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+                    characterMotion.setAttribute('class', 'character-float');
+                    characterMotion.style.animationDelay = `${(agents.indexOf(agent) % 7) * -0.31}s`;
+                    characterMotion.appendChild(imgEl);
+                    g.appendChild(characterMotion);
                 }
 
                 // Status Dot Indicator
@@ -1506,6 +1574,22 @@
                         const midX = (from.x + to.x) / 2;
                         const midY = (from.y + to.y) / 2 - 18;
                         path.setAttribute('d', `M ${from.x.toFixed(2)} ${from.y.toFixed(2)} Q ${midX.toFixed(2)} ${midY.toFixed(2)} ${to.x.toFixed(2)} ${to.y.toFixed(2)}`);
+                    });
+
+                    // Energy sparks travel along each live connection.
+                    edgesLayer.querySelectorAll('circle[data-energy-index]').forEach(particle => {
+                        const from = positions.get(particle.dataset.from);
+                        const to = positions.get(particle.dataset.to);
+                        if (!from || !to) return;
+                        const index = Number(particle.dataset.energyIndex) || 0;
+                        const progress = ((timestamp * (0.00016 + (index % 4) * 0.000025)) + index * 0.173) % 1;
+                        const controlX = (from.x + to.x) / 2;
+                        const controlY = (from.y + to.y) / 2 - 18;
+                        const inverse = 1 - progress;
+                        const x = inverse * inverse * from.x + 2 * inverse * progress * controlX + progress * progress * to.x;
+                        const y = inverse * inverse * from.y + 2 * inverse * progress * controlY + progress * progress * to.y;
+                        particle.setAttribute('cx', x.toFixed(2));
+                        particle.setAttribute('cy', y.toFixed(2));
                     });
                 }
 
