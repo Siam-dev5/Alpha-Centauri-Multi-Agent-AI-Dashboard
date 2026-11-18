@@ -845,7 +845,7 @@
           <button class="sc-tab rounded-lg border border-fuchsia-400/40 bg-fuchsia-500/15 px-3 py-2 text-xs text-fuchsia-200" onclick="switchSocialTab('accounts')">บัญชีที่เชื่อมต่อ</button>
           <button class="sc-tab rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-300" onclick="switchSocialTab('content')">Content &amp; Approval</button>
           <button class="sc-tab rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-300" onclick="switchSocialTab('access')">การตั้งค่า API</button>
-          <span id="sc-gateway-state" class="ml-auto self-center text-xs text-amber-300">กำลังตรวจสอบ Local Gateway…</span>
+          <span id="sc-gateway-state" class="ml-auto self-center text-xs text-amber-300">กำลังตรวจสอบ Cloud API…</span>
         </div>
         <div id="sc-panel" class="min-h-[360px] overflow-y-auto p-4"></div>
         <footer class="flex flex-wrap items-center justify-between gap-2 border-t border-slate-700/70 p-3 text-[11px] text-slate-400">
@@ -906,7 +906,7 @@
             document.getElementById('sc-auth-form').addEventListener('submit', async event => {
                 event.preventDefault(); const form = event.currentTarget, values = new FormData(form);
                 try {
-                    const response = await fetch(SC_API + (initialized ? '/auth/login' : '/auth/bootstrap'), {method:'POST',headers:{'Content-Type':'application/json',...(initialized ? {} : {'X-Bootstrap-Key':values.get('bootstrap')})},body:JSON.stringify({email:values.get('email'),password:values.get('password')})});
+                    const response = await fetch(SC_API + (initialized ? '/auth/login' : '/auth/bootstrap'), {method:'POST',headers:{'Content-Type':'application/json',...(initialized ? {} : {'Authorization':'Bootstrap ' + values.get('bootstrap')})},body:JSON.stringify({email:values.get('email'),password:values.get('password')})});
                     const data = await response.json(); if(!response.ok) throw new Error(data.error || 'Authentication failed');
                     sessionStorage.setItem('sc_session',data.token); sessionStorage.setItem('sc_user',JSON.stringify(data.user)); switchSocialTab('accounts');
                 } catch(error) { document.getElementById('sc-auth-error').textContent = error.message; }
