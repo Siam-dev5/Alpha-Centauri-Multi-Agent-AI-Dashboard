@@ -1,48 +1,65 @@
-# Alpha Centauri Multi-Agent AI Dashboard — V1.1
+# Alpha Centauri Multi-Agent AI Dashboard — V1.3.0
 
-Hybrid Local–Cloud command dashboard based on the supplied HTML reference. Includes a 13-node Star Map, 18 Ragnarok-style character avatars, API configuration, a local FastAPI Gateway, a Master planning stage, specialist LLM Workers, WebSocket transitions, and a local SQLite task history.
+Hybrid Local–Cloud command dashboard with a 13-node Star Map, 18 character avatars, local FastAPI Gateway, Master/Worker LLM orchestration, WebSocket status transitions, and SQLite task history.
 
 ## Quick start (Windows PowerShell)
 
-~~~powershell
+```powershell
 py -m venv .venv
-.\\.venv\\Scripts\\Activate.ps1
+.\.venv\Scripts\Activate.ps1
 pip install -r requirements-dev.txt
 Copy-Item .env.example .env
-# Enter provider keys in Dashboard > API & System Config, or in local .env
+# Configure provider API keys and a local SOCIAL_TOKEN_ENCRYPTION_KEY in .env
 uvicorn openbot_server:app --host 127.0.0.1 --port 8000 --reload --env-file .env
-~~~
+```
 
 In a second terminal:
 
-~~~powershell
+```powershell
 py -m http.server 5500
-~~~
+```
 
-Open http://127.0.0.1:5500. Choose **Live API Mode**, enable OpenBot, and use http://127.0.0.1:8000/api/dispatch plus ws://127.0.0.1:8000/ws.
+Open http://127.0.0.1:5500. Choose Live API Mode and configure the local Gateway at http://127.0.0.1:8000.
+
+## Social & Commerce Center — V1.3.0 Foundation
+
+The Dashboard now includes a Social & Affiliate workspace backed by local FastAPI endpoints:
+- Social account registry for Facebook Pages, Instagram, YouTube and TikTok.
+- Affiliate account placeholders for Shopee and Lazada (explicitly marked Disconnected until authorized).
+- Content drafts, affiliate disclosure field, target account selection and human approval/rejection workflow.
+- Audit events for account and content lifecycle changes.
+- AES-256-GCM token encryption helper using a key held only in local environment configuration.
+
+**Important:** This is the secure foundation, not a claim that platform accounts are already connected. OAuth adapters, real publishing and affiliate reporting remain disabled until developer credentials, platform permissions and required reviews are completed. The UI must not represent placeholder accounts as connected or show fabricated clicks, orders or commissions.
+
+See [Social & Commerce architecture](docs/social-commerce-v1.3.md) and [platform access checklist](docs/platform-access-checklist.md).
 
 ## Live Multi-Agent execution
 
 1. Master Bot analyses the request and returns a JSON plan.
 2. The Gateway validates Worker IDs against the fixed 10-agent allow-list.
-3. Selected Workers run in plan order using their configured provider/model/system prompt.
+3. Selected Workers run in plan order using configured provider/model/system prompts.
 4. Master synthesizes Worker outputs and returns the final response.
 5. WebSocket events update Agent status and the Star Map while SQLite keeps local task history.
 
-When OpenBot is enabled, provider API credentials from the Dashboard are sent only to the localhost Gateway for that request. The Gateway does not write credentials or image payloads to SQLite or logs. A local .env file can be used as a fallback.
+Provider API credentials are request-scoped or loaded from the local .env; they are not persisted in the task ledger.
 
-## Enable GitHub Pages (one-time owner action)
+## GitHub Pages
 
-Open **Settings → Pages** and set **Build and deployment → Source** to **GitHub Actions**. The deployment workflow will then publish the static Dashboard. Expected site URL:
-
+The static Dashboard is published at:
 https://siam-dev5.github.io/Alpha-Centauri-Multi-Agent-AI-Dashboard/
 
-## Local task history
+The Local Gateway must be running on the user's computer for Social & Commerce and live multi-agent API functions. GitHub Pages does not host the local FastAPI service.
 
-The Gateway stores task prompts, plans, statuses, and text results in data/alpha_centauri.sqlite3. Image payloads and provider API keys are not stored. Delete this file to clear local history.
+## Security and limitations
 
-## Current scope and limitations
+- Never commit .env, OAuth client secrets, access tokens, refresh tokens or encryption keys.
+- Keep the Gateway bound to 127.0.0.1; do not expose it publicly.
+- OAuth credentials and platform access reviews are required before real account connection.
+- TikTok unaudited Content Posting API clients are restricted to private visibility.
+- Shopee Affiliate Open API is subject to Thailand program eligibility and approval; Seller API credentials are not a substitute.
+- Affiliate reporting must distinguish clicks, attributed orders, pending/approved commission and cancellations. Missing API data is unavailable, not zero.
+- No publication occurs without an explicit human approval step.
+- The Simulation Mode remains a visual demo, not a real execution record.
 
-This release runs real Master and Worker LLM calls. It does **not** yet read/write local project files, run terminal commands, execute Git operations, render videos, generate images, publish to social media, or deploy production services. Those actions require dedicated tools and explicit Human Approval gates. The Simulation Mode remains a visual demo, not a real execution record.
-
-CI compiles Python and runs mocked Gateway tests. CI does not make paid provider calls; a passing test is not a live API billing or provider-availability test.
+CI uses mocked provider calls and local tests; a passing workflow is not a live API or real-account publishing test.
