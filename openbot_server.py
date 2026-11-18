@@ -29,21 +29,9 @@ app.add_middleware(
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=False,
     allow_methods=["GET", "POST"],
-    allow_headers=["Content-Type", "Authorization", "Access-Control-Request-Private-Network"],
+    allow_headers=["Content-Type", "Authorization"],
+    allow_private_network=True,
 )
-
-
-class PrivateNetworkAccessHeaders(BaseHTTPMiddleware):
-    """Allow explicitly-originated browser PNA preflights for the local gateway."""
-
-    async def dispatch(self, request, call_next):
-        response = await call_next(request)
-        if request.headers.get("access-control-request-private-network", "").lower() == "true":
-            response.headers["Access-Control-Allow-Private-Network"] = "true"
-        return response
-
-
-app.add_middleware(PrivateNetworkAccessHeaders)
 
 
 class Binding(BaseModel):
