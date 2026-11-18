@@ -128,10 +128,15 @@
             filter: drop-shadow(0 0 5px #f59e0b);
         }
 
+        /* Keep operational motion visible; reduce intensity rather than freezing the dashboard. */
         @media (prefers-reduced-motion: reduce) {
-            .animate-pulse, .animate-ping, .animate-edge,
-            .bot-aura-breathe, .character-float, .master-core-pulse,
-            .selection-orbit { animation: none !important; }
+            .animate-pulse { animation-duration: 3.2s !important; }
+            .animate-ping { animation-duration: 3.6s !important; }
+            .animate-edge { animation-duration: 2.4s !important; }
+            .bot-aura-breathe { animation-duration: 5.6s !important; }
+            .character-float { animation-duration: 4.4s !important; }
+            .master-core-pulse { animation-duration: 4.8s !important; }
+            .selection-orbit { animation-duration: 8s !important; }
         }
         .pixelated {
             image-rendering: pixelated;
@@ -1376,10 +1381,9 @@
                 aura.setAttribute('cy', agent.y);
                 aura.setAttribute('r', agent.r + (agent.status !== 'IDLE' ? 11 : 6));
                 aura.setAttribute('fill', st.ring);
-                aura.setAttribute('class', 'bot-aura-breathe');
-                if (agent.status === 'TALKING' || agent.status === 'WORKING') {
-                    aura.setAttribute('class', 'animate-pulse');
-                }
+                aura.setAttribute('class', agent.status === 'TALKING' || agent.status === 'WORKING'
+                    ? 'bot-aura-breathe is-active'
+                    : 'bot-aura-breathe');
                 g.appendChild(aura);
 
                 // Selection Ring
@@ -1518,7 +1522,8 @@
                     radiusX,
                     radiusY,
                     angle: Math.atan2(dy / radiusY, dx / radiusX),
-                    speed: 0.032 + (index % 4) * 0.0045,
+                    // 0.12–0.195 rad/sec gives a clearly visible 32–52s orbit.
+                    speed: 0.12 + (index % 4) * 0.025,
                     direction: index % 2 === 0 ? 1 : -1
                 };
             }
@@ -1526,17 +1531,16 @@
         }
 
         function startOrbitalAnimation() {
-            if (orbitalAnimationFrame || orbitalMotionQuery.matches) return;
+            // Do not stop the RAF loop for OS reduced-motion settings.
+            // That preference only lowers speed/intensity; the live command map
+            // must remain visibly active so users can read agent movement/state.
+            if (orbitalAnimationFrame) return;
             orbitalLastTimestamp = 0;
 
             const animate = (timestamp) => {
-                if (orbitalMotionQuery.matches) {
-                    orbitalAnimationFrame = 0;
-                    return;
-                }
-
+                const motionScale = orbitalMotionQuery.matches ? 0.42 : 1;
                 const deltaSeconds = orbitalLastTimestamp
-                    ? Math.min((timestamp - orbitalLastTimestamp) / 1000, 0.05)
+                    ? Math.min((timestamp - orbitalLastTimestamp) / 1000, 0.05) * motionScale
                     : 0;
                 orbitalLastTimestamp = timestamp;
 
@@ -1599,14 +1603,9 @@
             orbitalAnimationFrame = requestAnimationFrame(animate);
         }
 
-        orbitalMotionQuery.addEventListener?.('change', (event) => {
-            if (event.matches && orbitalAnimationFrame) {
-                cancelAnimationFrame(orbitalAnimationFrame);
-                orbitalAnimationFrame = 0;
-                orbitalLastTimestamp = 0;
-            } else if (!event.matches) {
-                startOrbitalAnimation();
-            }
+        orbitalMotionQuery.addEventListener?.('change', () => {
+            // The animation loop stays alive; motionScale adjusts on the next frame.
+            if (!orbitalAnimationFrame) startOrbitalAnimation();
         });
 
         // ==========================================
