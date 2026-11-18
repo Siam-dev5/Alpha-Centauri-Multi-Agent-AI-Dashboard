@@ -79,7 +79,7 @@ def test_rejected_content_cannot_be_published_or_approved_twice(monkeypatch, tmp
         "platform":"lazada_affiliate", "account_name":"Publisher placeholder"
     }).json()
     item_id = client.post("/api/social-commerce/content", json={
-        "title":"Draft", "body":"Body", "platforms":["lazada_affiliate"],
+        "title":"Draft", "body":"Body", "disclosure":"ลิงก์ Affiliate", "platforms":["lazada_affiliate"],
         "account_ids":[account["id"]]
     }).json()["id"]
     client.post(f"/api/social-commerce/content/{item_id}/submit")
