@@ -186,6 +186,8 @@ def create_content(payload: ContentCreate) -> dict[str, Any]:
     init_social_db()
     if any(platform not in PLATFORMS for platform in payload.platforms):
         raise HTTPException(422, "Unsupported target platform")
+    if any(platform.endswith("_affiliate") for platform in payload.platforms) and not payload.disclosure.strip():
+        raise HTTPException(422, "Affiliate content requires a clear disclosure statement")
     if len(set(payload.platforms)) != len(payload.platforms) or len(set(payload.account_ids)) != len(payload.account_ids):
         raise HTTPException(422, "Duplicate platforms or account destinations are not allowed")
     item_id, stamp = uuid.uuid4().hex, now()
