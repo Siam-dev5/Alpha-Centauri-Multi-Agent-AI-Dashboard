@@ -97,3 +97,16 @@ def test_aes_gcm_token_encryption_round_trip(monkeypatch):
     encrypted = sc.encrypt_token("sensitive-token")
     assert encrypted != "sensitive-token"
     assert sc.decrypt_token(encrypted) == "sensitive-token"
+
+
+def test_affiliate_content_requires_disclosure(monkeypatch, tmp_path):
+    use_db(monkeypatch, tmp_path)
+    account = client.post("/api/social-commerce/accounts", json={
+        "platform":"shopee_affiliate", "account_name":"Affiliate publisher"
+    }).json()
+    response = client.post("/api/social-commerce/content", json={
+        "title":"Product post", "body":"Promotional copy",
+        "platforms":["shopee_affiliate"], "account_ids":[account["id"]]
+    })
+    assert response.status_code == 422
+    assert "disclosure" in response.text.lower()
