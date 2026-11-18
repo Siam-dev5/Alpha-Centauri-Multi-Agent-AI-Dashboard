@@ -79,44 +79,75 @@
             border: 1px solid rgba(56, 189, 248, 0.15);
         }
 
-        /* Three-panel workspace: side panels can collapse into slim control rails. */
+        /* Balanced three-column workspace with explicit placement.
+           Explicit grid-column assignments override the original Tailwind span classes. */
         @media (min-width: 1024px) {
             .workspace-grid {
                 display: grid !important;
-                grid-template-columns: minmax(250px, 3fr) minmax(500px, 6fr) minmax(270px, 3fr);
+                grid-template-columns: minmax(250px, 1fr) minmax(500px, 2fr) minmax(270px, 1fr);
+                grid-template-rows: minmax(0, 1fr);
                 align-items: stretch;
             }
+            #openbot-panel {
+                grid-column: 1 / 2 !important;
+                grid-row: 1 !important;
+            }
+            #star-map-panel {
+                grid-column: 2 / 3 !important;
+                grid-row: 1 !important;
+                min-width: 0;
+            }
+            #activity-panel {
+                grid-column: 3 / 4 !important;
+                grid-row: 1 !important;
+            }
             .workspace-grid.left-collapsed {
-                grid-template-columns: 58px minmax(0, 1fr) minmax(270px, 3fr);
+                grid-template-columns: 58px minmax(0, 2fr) minmax(270px, 1fr);
             }
             .workspace-grid.right-collapsed {
-                grid-template-columns: minmax(250px, 3fr) minmax(0, 1fr) 58px;
+                grid-template-columns: minmax(250px, 1fr) minmax(0, 2fr) 58px;
             }
             .workspace-grid.left-collapsed.right-collapsed {
                 grid-template-columns: 58px minmax(0, 1fr) 58px;
             }
-            .workspace-grid > .workspace-panel { min-width: 0; }
+            .workspace-panel { min-width: 0; }
             .workspace-panel.is-collapsed > :not(.panel-header-top) {
                 display: none !important;
             }
             .workspace-panel.is-collapsed .panel-header-top {
                 min-height: 100%;
-                padding: 12px 6px;
+                padding: 12px 5px;
                 flex-direction: column;
+                align-items: center;
                 justify-content: flex-start;
-                gap: 14px;
+                gap: 12px;
                 border-bottom: 0;
             }
             .workspace-panel.is-collapsed .panel-heading {
-                writing-mode: vertical-rl;
-                text-orientation: mixed;
-                white-space: nowrap;
+                flex-direction: column;
+                justify-content: center;
+                gap: 0;
+                writing-mode: initial;
             }
+            .workspace-panel.is-collapsed .panel-heading h2,
             .workspace-panel.is-collapsed .panel-heading p,
-            .workspace-panel.is-collapsed .panel-header-content { display: none !important; }
-            .workspace-panel.is-collapsed .panel-heading h2 { font-size: 12px; }
-            .workspace-panel.is-collapsed .panel-header-top .panel-heading-icon { display: none; }
-            .workspace-panel.is-collapsed .panel-collapse-icon { transform: rotate(180deg); }
+            .workspace-panel.is-collapsed .panel-header-content,
+            .workspace-panel.is-collapsed #log-count,
+            .workspace-panel.is-collapsed button[title="ล้างประวัติแชท"] {
+                display: none !important;
+            }
+            .workspace-panel.is-collapsed .panel-header-top .panel-heading-icon {
+                display: flex !important;
+                width: 30px;
+                height: 30px;
+            }
+            .workspace-panel.is-collapsed .panel-collapse-btn {
+                margin: 0 auto;
+                padding: 8px;
+            }
+            .workspace-panel.is-collapsed .panel-collapse-icon {
+                transform: none;
+            }
         }
         .panel-collapse-btn { flex-shrink: 0; }
         @media (max-width: 1023px) {
