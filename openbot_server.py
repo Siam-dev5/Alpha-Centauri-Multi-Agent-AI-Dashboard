@@ -10,9 +10,13 @@ import httpx
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from starlette.middleware.base import BaseHTTPMiddleware
+from dotenv import load_dotenv
 
-APP_VERSION = "1.0.1"
+load_dotenv()
+
+from orchestrator import get_task, list_tasks, run_orchestration, task_count
+
+APP_VERSION = "1.1.0"
 DEFAULT_ORIGINS = (
     "http://localhost:5500,http://127.0.0.1:5500,"
     "http://localhost:8000,http://127.0.0.1:8000,https://siam-dev5.github.io"
@@ -45,6 +49,8 @@ class DispatchRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=20_000)
     image_base64: str | None = Field(default=None, max_length=12_000_000)
     bindings: dict[str, Binding] = Field(default_factory=dict)
+    # Request-scoped only; never saved or logged by the Gateway.
+    provider_keys: dict[str, str] = Field(default_factory=dict)
 
 
 class Hub:
@@ -80,7 +86,7 @@ def make_event(
     }
 
 
-async def call_provider(binding: Binding, prompt: str, image_data: str | None = None) -> str:
+async def call_provider(binding: Binding, prompt: str, image_data: str | None = None, provider_keys: dict[str, str] | None = None) -> str:
     provider = binding.provider.lower()
     model = binding.model
     env_names = {
@@ -93,7 +99,8 @@ async def call_provider(binding: Binding, prompt: str, image_data: str | None = 
     if provider not in env_names:
         raise HTTPException(400, f"Unsupported provider: {provider}")
 
-    key = os.getenv(env_names[provider], "")
+    credentials = provider_keys or {}
+    key = credentials.get(provider, "").strip() or os.getenv(env_names[provider], "")
     if provider != "ollama" and not key:
         raise HTTPException(424, f"Missing local environment variable: {env_names[provider]}")
 
@@ -101,7 +108,7 @@ async def call_provider(binding: Binding, prompt: str, image_data: str | None = 
         base_url = {
             "openai": "https://api.openai.com/v1",
             "xai": "https://api.x.ai/v1",
-            "ollama": os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
+            "ollama": credentials.get("ollama", "").strip() or os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
         }[provider]
         content: Any = prompt
         if image_data and provider != "ollama":
@@ -170,27 +177,37 @@ async def health() -> dict[str, Any]:
         "status": "online",
         "version": APP_VERSION,
         "websocket_clients": len(hub.clients),
+        "stored_tasks": task_count(),
         "allowed_origins": ALLOWED_ORIGINS,
     }
 
 
+@app.get("/api/tasks")
+async def api_list_tasks(limit: int = 20) -> dict[str, Any]:
+    return {"tasks": list_tasks(limit)}
+
+
+@app.get("/api/tasks/{task_id}")
+async def api_task_detail(task_id: str) -> dict[str, Any]:
+    task = get_task(task_id)
+    if task is None:
+        raise HTTPException(404, "Task not found")
+    return task
+
+
 @app.post("/api/dispatch")
-async def dispatch(request: DispatchRequest) -> dict[str, str]:
-    master = request.bindings.get("master", Binding())
-    await hub.emit(make_event(request.task_id, "user", "master", "WORKING", "CORE", "Master Bot กำลังประมวลผลคำสั่ง"))
-    try:
-        reply = await call_provider(master, request.prompt, request.image_base64)
-        await hub.emit(make_event(request.task_id, "master", "user", "IDLE", "CORE", "Master Bot ส่งคำตอบกลับแล้ว"))
-        return {
-            "task_id": request.task_id,
-            "status": "completed",
-            "reply": reply,
-            "provider": master.provider,
-            "model": master.model,
-        }
-    except HTTPException as exc:
-        await hub.emit(make_event(request.task_id, "master", "user", "BLOCKED", "CORE", str(exc.detail)))
-        raise
+async def dispatch(request: DispatchRequest) -> dict[str, Any]:
+    return await run_orchestration(
+        task_id=request.task_id,
+        prompt=request.prompt,
+        image_data=request.image_base64,
+        bindings=request.bindings,
+        provider_keys=request.provider_keys,
+        Binding=Binding,
+        call_provider=call_provider,
+        emit=hub.emit,
+        make_event=make_event,
+    )
 
 
 @app.websocket("/ws")
