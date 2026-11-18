@@ -17,7 +17,7 @@ load_dotenv()
 from orchestrator import get_task, list_tasks, run_orchestration, task_count
 from social_commerce import router as social_commerce_router, init_social_db
 
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.3.0"
 DEFAULT_ORIGINS = (
     "http://localhost:5500,http://127.0.0.1:5500,"
     "http://localhost:8000,http://127.0.0.1:8000,https://siam-dev5.github.io"
