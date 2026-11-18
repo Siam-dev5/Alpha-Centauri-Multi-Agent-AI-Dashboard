@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from orchestrator import get_task, list_tasks, run_orchestration, task_count
+from social_commerce import router as social_commerce_router, init_social_db
 
 APP_VERSION = "1.1.0"
 DEFAULT_ORIGINS = (
@@ -27,7 +28,12 @@ ALLOWED_ORIGINS = [
     if origin.strip()
 ]
 
-app = FastAPI(title="Alpha Centauri Local Gateway", version=APP_VERSION)
+app = FastAPI(title="Alpha Centauri Local Gateway", version="1.3.0")
+app.include_router(social_commerce_router)
+
+@app.on_event("startup")
+async def initialize_social_commerce() -> None:
+    init_social_db()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
