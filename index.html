@@ -907,7 +907,7 @@
                 event.preventDefault(); const form = event.currentTarget, values = new FormData(form);
                 try {
                     const response = await fetch(SC_API + (initialized ? '/auth/login' : '/auth/bootstrap'), {method:'POST',headers:{'Content-Type':'application/json',...(initialized ? {} : {'Authorization':'Bootstrap ' + values.get('bootstrap')})},body:JSON.stringify({email:values.get('email'),password:values.get('password')})});
-                    const data = await response.json(); if(!response.ok) throw new Error(data.error || 'Authentication failed');
+                    const data = await response.json(); if(!response.ok) throw new Error([data.error || 'Authentication failed',data.diagnostic_stage ? 'Stage: '+data.diagnostic_stage : '',data.diagnostic_message ? 'Detail: '+data.diagnostic_message : ''].filter(Boolean).join(' | '));
                     sessionStorage.setItem('sc_session',data.token); sessionStorage.setItem('sc_user',JSON.stringify(data.user)); switchSocialTab('accounts');
                 } catch(error) { document.getElementById('sc-auth-error').textContent = error.message; }
             });
