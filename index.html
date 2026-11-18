@@ -84,7 +84,7 @@
         @media (min-width: 1024px) {
             .workspace-grid {
                 display: grid !important;
-                grid-template-columns: minmax(250px, 1fr) minmax(500px, 2fr) minmax(270px, 1fr);
+                grid-template-columns: minmax(250px, 1fr) minmax(500px, 2fr) minmax(270px, 1fr) !important;
                 grid-template-rows: minmax(0, 1fr);
                 align-items: stretch;
             }
@@ -102,13 +102,13 @@
                 grid-row: 1 !important;
             }
             .workspace-grid.left-collapsed {
-                grid-template-columns: 58px minmax(0, 2fr) minmax(270px, 1fr);
+                grid-template-columns: 58px minmax(0, 2fr) minmax(270px, 1fr) !important;
             }
             .workspace-grid.right-collapsed {
-                grid-template-columns: minmax(250px, 1fr) minmax(0, 2fr) 58px;
+                grid-template-columns: minmax(250px, 1fr) minmax(0, 2fr) 58px !important;
             }
             .workspace-grid.left-collapsed.right-collapsed {
-                grid-template-columns: 58px minmax(0, 1fr) 58px;
+                grid-template-columns: 58px minmax(0, 1fr) 58px !important;
             }
             .workspace-panel { min-width: 0; }
             .workspace-panel.is-collapsed > :not(.panel-header-top) {
