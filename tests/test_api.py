@@ -4,14 +4,16 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 import openbot_server
+import orchestrator
 
 client = TestClient(openbot_server.app)
 
 
 def use_test_db(monkeypatch, tmp_path):
-    monkeypatch.setattr(openbot_server, "DATABASE_PATH", tmp_path / "test.sqlite3")
+    monkeypatch.setattr(orchestrator, "DATABASE_PATH", tmp_path / "test.sqlite3")
 
 
 def test_health_endpoint(monkeypatch, tmp_path):
@@ -27,6 +29,11 @@ def test_health_endpoint(monkeypatch, tmp_path):
 def test_dispatch_requires_configured_provider_key(monkeypatch, tmp_path):
     use_test_db(monkeypatch, tmp_path)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    async def missing_key(binding, prompt, image_data=None, provider_keys=None):
+        raise HTTPException(424, "Missing local environment variable: OPENAI_API_KEY")
+
+    monkeypatch.setattr(openbot_server, "call_provider", missing_key)
     response = client.post(
         "/api/dispatch",
         json={
@@ -36,7 +43,7 @@ def test_dispatch_requires_configured_provider_key(monkeypatch, tmp_path):
         },
     )
     assert response.status_code == 424
-    assert "provider key" in response.text
+    assert "OPENAI_API_KEY" in response.text
     stored = client.get("/api/tasks/TEST-001")
     assert stored.status_code == 200
     assert stored.json()["status"] == "blocked"
@@ -47,6 +54,7 @@ def test_dispatch_returns_master_only_for_general_answer(monkeypatch, tmp_path):
 
     async def fake_call_provider(binding, prompt, image_data=None, provider_keys=None):
         assert binding.model == "gpt-4o-mini"
+        assert "คำสั่งผู้ใช้" in prompt
         return "ตอบกลับจาก Master"
 
     monkeypatch.setattr(openbot_server, "call_provider", fake_call_provider)
@@ -81,7 +89,7 @@ def test_empty_master_plan_returns_summary_without_workers(monkeypatch, tmp_path
     assert response.json()["execution_mode"] == "master_only"
 
 
-def test_dispatch_runs_master_plan_and_worker(monkeypatch, tmp_path):
+def test_dispatch_runs_master_plan_and_workers(monkeypatch, tmp_path):
     use_test_db(monkeypatch, tmp_path)
     calls = []
 
@@ -130,7 +138,7 @@ def test_dispatch_runs_master_plan_and_worker(monkeypatch, tmp_path):
 
 
 def test_parse_plan_rejects_unknown_and_duplicate_agents():
-    parsed = openbot_server.parse_master_plan(json.dumps({
+    parsed = orchestrator.parse_master_plan(json.dumps({
         "summary": "test",
         "tasks": [
             {"agent_id": "prog1", "instruction": "first"},
@@ -140,6 +148,14 @@ def test_parse_plan_rejects_unknown_and_duplicate_agents():
     }))
     assert parsed is not None
     assert [task["agent_id"] for task in parsed["tasks"]] == ["prog1"]
+
+
+def test_task_history_list_endpoint(monkeypatch, tmp_path):
+    use_test_db(monkeypatch, tmp_path)
+    orchestrator.save_task("TEST-LIST", "sample prompt", "completed", [], [])
+    response = client.get("/api/tasks")
+    assert response.status_code == 200
+    assert response.json()["tasks"][0]["task_id"] == "TEST-LIST"
 
 
 def test_websocket_handshake():
