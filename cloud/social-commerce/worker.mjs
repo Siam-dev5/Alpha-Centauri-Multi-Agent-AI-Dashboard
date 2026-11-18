@@ -45,7 +45,7 @@ async function handle(request,env) {
  const url=new URL(request.url), path=url.pathname.replace(/^\/api\/social-commerce/,"")||"/", method=request.method;
  if(method==="OPTIONS") return new Response(null,{status:204,headers:cors(request)});
  if(method==="GET" && path==="/health") {
-  const setup=!!env.BOOTSTRAP_KEY && !!env.SESSION_SIGNING_KEY && !!env.TOKEN_ENCRYPTION_KEY;
+  const setup=!!env.BOOTSTRAP_KEY && !!env.TOKEN_ENCRYPTION_KEY;
   const users=await env.DB.prepare("SELECT COUNT(*) n FROM app_users").first();
   return json({service:"Alpha Centauri Social Commerce Cloud API",status:"online",mode:"cloud",setup_ready:setup,admin_initialized:(users?.n||0)>0,publishing_enabled:false,platforms:Object.fromEntries(PLATFORMS.map(p=>[p,"oauth_not_configured"]))},200,cors(request));
  }
