@@ -861,7 +861,7 @@
         // ==========================================
         // SOCIAL & COMMERCE CENTER (LOCAL FOUNDATION)
         // ==========================================
-        const SC_API = 'http://127.0.0.1:8000/api/social-commerce';
+        const SC_API = 'https://social-api.siamhrbp.com/api/social-commerce';
         let scAccounts = [];
         let scItems = [];
         let scActiveTab = 'accounts';
@@ -870,8 +870,7 @@
             const modal = document.getElementById('social-commerce-modal');
             modal.classList.remove('hidden');
             modal.classList.add('flex');
-            switchSocialTab('accounts');
-            checkSocialGateway();
+            checkSocialGateway().then(() => switchSocialTab('accounts'));
         }
         function closeSocialCommerce() {
             const modal = document.getElementById('social-commerce-modal');
@@ -881,22 +880,41 @@
         async function scRequest(path, options = {}) {
             const response = await fetch(SC_API + path, {
                 ...options,
-                headers: { 'Content-Type': 'application/json', ...(options.headers || {}) }
+                headers: { 'Content-Type': 'application/json', ...(sessionStorage.getItem('sc_session') ? { 'Authorization': 'Bearer ' + sessionStorage.getItem('sc_session') } : {}), ...(options.headers || {}) }
             });
             const data = await response.json().catch(() => ({}));
-            if (!response.ok) throw new Error(data.detail || 'Local Gateway request failed (' + response.status + ')');
+            if (!response.ok) throw new Error(data.detail || data.error || 'Cloud API request failed (' + response.status + ')');
             return data;
         }
         async function checkSocialGateway() {
             const label = document.getElementById('sc-gateway-state');
             try {
                 const data = await scRequest('/health');
-                label.textContent = '● Local Gateway Online · ' + data.connected_accounts + ' บัญชี';
+                label.textContent = '● Cloud API Online · ' + (data.admin_initialized ? 'พร้อมใช้งาน' : 'รอตั้งค่าผู้ดูแล');
                 label.className = 'ml-auto self-center text-xs text-emerald-300';
+                window.scCloudHealth = data;
             } catch (error) {
-                label.textContent = '● Local Gateway Offline';
+                label.textContent = '● Cloud API Offline';
                 label.className = 'ml-auto self-center text-xs text-rose-300';
+                window.scCloudHealth = null;
             }
+        }
+        function renderSocialAuth() {
+            const panel = document.getElementById('sc-panel');
+            const initialized = !!window.scCloudHealth?.admin_initialized;
+            panel.innerHTML = '<div class="mx-auto max-w-lg rounded-xl border border-fuchsia-400/30 bg-slate-950/70 p-5"><h3 class="text-base font-semibold text-white">' + (initialized ? 'เข้าสู่ระบบ Social & Commerce' : 'ตั้งค่าผู้ดูแลระบบครั้งแรก') + '</h3><p class="mt-2 text-xs leading-6 text-slate-400">ระบบทำงานบน Cloudflare ไม่ต้องเปิด Local Gateway · บัญชีและ Token แยกจาก OpenBot Local</p><form id="sc-auth-form" class="mt-4 space-y-3">' + (!initialized ? '<input name="bootstrap" required placeholder="One-time Bootstrap Key" class="w-full rounded-lg border border-slate-700 bg-slate-900 p-3 text-sm text-white">' : '') + '<input name="email" type="email" required placeholder="อีเมลผู้ดูแล" class="w-full rounded-lg border border-slate-700 bg-slate-900 p-3 text-sm text-white"><input name="password" type="password" required minlength="14" placeholder="รหัสผ่าน (อย่างน้อย 14 ตัวอักษร)" class="w-full rounded-lg border border-slate-700 bg-slate-900 p-3 text-sm text-white"><button class="w-full rounded-lg bg-fuchsia-500/20 px-4 py-3 text-sm font-medium text-fuchsia-100 border border-fuchsia-400/30">' + (initialized ? 'เข้าสู่ระบบ' : 'สร้างบัญชีผู้ดูแลและเข้าสู่ระบบ') + '</button></form><p id="sc-auth-error" class="mt-3 text-xs text-rose-300"></p><p class="mt-4 text-[11px] text-slate-500">การตั้งค่าครั้งแรกใช้รหัสครั้งเดียวที่ผู้ดูแลได้รับ หลังจากสร้างบัญชีแล้ว Bootstrap Key จะใช้ซ้ำไม่ได้</p></div>';
+            document.getElementById('sc-auth-form').addEventListener('submit', async event => {
+                event.preventDefault(); const form = event.currentTarget, values = new FormData(form);
+                try {
+                    const response = await fetch(SC_API + (initialized ? '/auth/login' : '/auth/bootstrap'), {method:'POST',headers:{'Content-Type':'application/json',...(initialized ? {} : {'X-Bootstrap-Key':values.get('bootstrap')})},body:JSON.stringify({email:values.get('email'),password:values.get('password')})});
+                    const data = await response.json(); if(!response.ok) throw new Error(data.error || 'Authentication failed');
+                    sessionStorage.setItem('sc_session',data.token); sessionStorage.setItem('sc_user',JSON.stringify(data.user)); switchSocialTab('accounts');
+                } catch(error) { document.getElementById('sc-auth-error').textContent = error.message; }
+            });
+        }
+        async function logoutSocialCommerce() {
+            try { await scRequest('/auth/logout',{method:'POST'}); } catch(e) {}
+            sessionStorage.removeItem('sc_session'); sessionStorage.removeItem('sc_user'); renderSocialAuth();
         }
         function switchSocialTab(tab) {
             scActiveTab = tab;
@@ -905,6 +923,7 @@
                 button.className = 'sc-tab rounded-lg border px-3 py-2 text-xs ' +
                     (active ? 'border-fuchsia-400/40 bg-fuchsia-500/15 text-fuchsia-200' : 'border-slate-700 text-slate-300');
             });
+            if (!sessionStorage.getItem('sc_session')) { renderSocialAuth(); return; }
             if (tab === 'accounts') renderSocialAccounts();
             if (tab === 'content') renderSocialContent();
             if (tab === 'access') renderSocialAccess();
@@ -919,7 +938,7 @@
                     {title:'Social Media', platforms:[['facebook','Facebook Pages'],['instagram','Instagram'],['youtube','YouTube'],['tiktok','TikTok']]},
                     {title:'Affiliate Marketplace', platforms:[['shopee_affiliate','Shopee Affiliate'],['lazada_affiliate','Lazada Affiliate']]}
                 ];
-                panel.innerHTML = groups.map(group => '<section class="mb-6"><h3 class="mb-3 text-sm font-semibold text-slate-200">' + group.title + '</h3><div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">' +
+                panel.innerHTML = '<div class="mb-4 flex justify-end"><button onclick="logoutSocialCommerce()" class="rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-300">ออกจากระบบ</button></div>' + groups.map(group => '<section class="mb-6"><h3 class="mb-3 text-sm font-semibold text-slate-200">' + group.title + '</h3><div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">' +
                     group.platforms.map(([key,name]) => {
                         const accounts = scAccounts.filter(a => a.platform === key);
                         const state = accounts.length ? accounts.map(a => '<div class="mt-2 flex items-center justify-between gap-2 rounded-lg bg-slate-900/70 p-2"><div class="min-w-0"><p class="truncate text-xs text-white">' + escapeHtml(a.account_name) + '</p><p class="text-[10px] text-amber-300">● ' + escapeHtml(a.status) + '</p></div><button onclick="disconnectSocialAccount(\'' + a.id + '\')" class="text-[10px] text-rose-300 hover:text-rose-200">ลบ</button></div>').join('') : '<p class="mt-2 text-xs text-slate-500">ยังไม่มีบัญชี</p>';
