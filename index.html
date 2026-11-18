@@ -270,6 +270,10 @@
                 <span class="text-slate-400">Tokens:</span>
                 <span class="font-mono font-semibold text-purple-300" id="stat-tokens">42.8K</span>
             </div>
+            <button type="button" onclick="openSocialCommerce()" class="px-3 py-1.5 rounded-xl bg-gradient-to-r from-fuchsia-500/20 to-rose-500/20 hover:from-fuchsia-500/30 hover:to-rose-500/30 border border-fuchsia-500/40 text-fuchsia-200 font-medium flex items-center gap-1.5 shadow-lg shadow-fuchsia-500/10 transition">
+                <i data-lucide="share-2" class="w-3.5 h-3.5 text-fuchsia-300"></i>
+                <span>Social &amp; Affiliate</span>
+            </button>
             <button type="button" onclick="openConfigModal('gateway')" class="px-3 py-1.5 rounded-xl bg-gradient-to-r from-sky-500/20 to-indigo-500/20 hover:from-sky-500/30 hover:to-indigo-500/30 border border-sky-500/40 text-sky-200 font-medium flex items-center gap-1.5 shadow-lg shadow-sky-500/10 transition">
                 <i data-lucide="settings" class="w-3.5 h-3.5 text-sky-400"></i>
                 <span>API &amp; System Config</span>
@@ -819,7 +823,7 @@
 
 
     <footer class="no-print fixed bottom-0 left-0 right-0 z-50 flex items-center justify-center border-t border-border/40 bg-background/80 py-2.5 text-center text-xs text-muted-foreground backdrop-blur-md">
-      <div>© 2026 SIAM HRBP SOFT · Alpha Centauri Multi-Agent AI Dashboard (V1.2.0) | ติดต่อผู้พัฒนา LINE ID: 
+      <div>© 2026 SIAM HRBP SOFT · Alpha Centauri Multi-Agent AI Dashboard (V1.3.0) | ติดต่อผู้พัฒนา LINE ID: 
         <a href="https://line.me/ti/p/~dj_nodoubt" target="_blank" rel="noopener noreferrer" class="font-medium text-primary hover:underline transition-colors">dj_nodoubt</a>
       </div>
     </footer>
@@ -827,7 +831,168 @@
     <!-- Toast Notification Container -->
     <div id="toast-container" class="fixed bottom-4 right-4 z-50 flex flex-col gap-2 pointer-events-none"></div>
 
+    <!-- Social & Commerce Center: local gateway-backed account and approval workspace -->
+    <div id="social-commerce-modal" class="fixed inset-0 z-[80] hidden items-center justify-center bg-black/80 p-3 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="social-commerce-title">
+      <section class="glass-panel w-full max-w-6xl max-h-[92vh] overflow-hidden rounded-2xl border border-fuchsia-400/30 shadow-2xl flex flex-col">
+        <header class="flex items-center justify-between gap-3 border-b border-slate-700/70 p-4">
+          <div>
+            <h2 id="social-commerce-title" class="text-lg font-semibold text-white">Social &amp; Commerce Center</h2>
+            <p class="text-xs text-slate-400">ศูนย์จัดการบัญชี โพสต์ และ Affiliate · V1.3.0 Foundation</p>
+          </div>
+          <button type="button" onclick="closeSocialCommerce()" class="rounded-lg p-2 text-slate-400 hover:bg-slate-800 hover:text-white" aria-label="ปิด">✕</button>
+        </header>
+        <div class="flex flex-wrap gap-2 border-b border-slate-700/70 p-3">
+          <button class="sc-tab rounded-lg border border-fuchsia-400/40 bg-fuchsia-500/15 px-3 py-2 text-xs text-fuchsia-200" onclick="switchSocialTab('accounts')">บัญชีที่เชื่อมต่อ</button>
+          <button class="sc-tab rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-300" onclick="switchSocialTab('content')">Content &amp; Approval</button>
+          <button class="sc-tab rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-300" onclick="switchSocialTab('access')">การตั้งค่า API</button>
+          <span id="sc-gateway-state" class="ml-auto self-center text-xs text-amber-300">กำลังตรวจสอบ Local Gateway…</span>
+        </div>
+        <div id="sc-panel" class="min-h-[360px] overflow-y-auto p-4"></div>
+        <footer class="flex flex-wrap items-center justify-between gap-2 border-t border-slate-700/70 p-3 text-[11px] text-slate-400">
+          <span>ยังไม่มีการเผยแพร่โพสต์จากหน้าจอนี้ · ทุกโพสต์ต้องผ่าน Human Approval</span>
+          <button type="button" onclick="closeSocialCommerce()" class="rounded-lg bg-slate-700 px-4 py-2 text-white hover:bg-slate-600">ปิดหน้าต่าง</button>
+        </footer>
+      </section>
+    </div>
+
+
     <script>
+
+        // ==========================================
+        // SOCIAL & COMMERCE CENTER (LOCAL FOUNDATION)
+        // ==========================================
+        const SC_API = 'http://127.0.0.1:8000/api/social-commerce';
+        let scAccounts = [];
+        let scItems = [];
+        let scActiveTab = 'accounts';
+
+        function openSocialCommerce() {
+            const modal = document.getElementById('social-commerce-modal');
+            modal.classList.remove('hidden');
+            modal.classList.add('flex');
+            switchSocialTab('accounts');
+            checkSocialGateway();
+        }
+        function closeSocialCommerce() {
+            const modal = document.getElementById('social-commerce-modal');
+            modal.classList.add('hidden');
+            modal.classList.remove('flex');
+        }
+        async function scRequest(path, options = {}) {
+            const response = await fetch(SC_API + path, {
+                ...options,
+                headers: { 'Content-Type': 'application/json', ...(options.headers || {}) }
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(data.detail || 'Local Gateway request failed (' + response.status + ')');
+            return data;
+        }
+        async function checkSocialGateway() {
+            const label = document.getElementById('sc-gateway-state');
+            try {
+                const data = await scRequest('/health');
+                label.textContent = '● Local Gateway Online · ' + data.connected_accounts + ' บัญชี';
+                label.className = 'ml-auto self-center text-xs text-emerald-300';
+            } catch (error) {
+                label.textContent = '● Local Gateway Offline';
+                label.className = 'ml-auto self-center text-xs text-rose-300';
+            }
+        }
+        function switchSocialTab(tab) {
+            scActiveTab = tab;
+            document.querySelectorAll('.sc-tab').forEach((button, index) => {
+                const active = ['accounts','content','access'][index] === tab;
+                button.className = 'sc-tab rounded-lg border px-3 py-2 text-xs ' +
+                    (active ? 'border-fuchsia-400/40 bg-fuchsia-500/15 text-fuchsia-200' : 'border-slate-700 text-slate-300');
+            });
+            if (tab === 'accounts') renderSocialAccounts();
+            if (tab === 'content') renderSocialContent();
+            if (tab === 'access') renderSocialAccess();
+        }
+        async function renderSocialAccounts() {
+            const panel = document.getElementById('sc-panel');
+            panel.innerHTML = '<p class="text-sm text-slate-400">กำลังโหลดบัญชี…</p>';
+            try {
+                const data = await scRequest('/accounts');
+                scAccounts = data.accounts || [];
+                const groups = [
+                    {title:'Social Media', platforms:[['facebook','Facebook Pages'],['instagram','Instagram'],['youtube','YouTube'],['tiktok','TikTok']]},
+                    {title:'Affiliate Marketplace', platforms:[['shopee_affiliate','Shopee Affiliate'],['lazada_affiliate','Lazada Affiliate']]}
+                ];
+                panel.innerHTML = groups.map(group => '<section class="mb-6"><h3 class="mb-3 text-sm font-semibold text-slate-200">' + group.title + '</h3><div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">' +
+                    group.platforms.map(([key,name]) => {
+                        const accounts = scAccounts.filter(a => a.platform === key);
+                        const state = accounts.length ? accounts.map(a => '<div class="mt-2 flex items-center justify-between gap-2 rounded-lg bg-slate-900/70 p-2"><div class="min-w-0"><p class="truncate text-xs text-white">' + escapeHtml(a.account_name) + '</p><p class="text-[10px] text-amber-300">● ' + escapeHtml(a.status) + '</p></div><button onclick="disconnectSocialAccount(\'' + a.id + '\')" class="text-[10px] text-rose-300 hover:text-rose-200">ลบ</button></div>').join('') : '<p class="mt-2 text-xs text-slate-500">ยังไม่มีบัญชี</p>';
+                        const action = key.endsWith('_affiliate')
+                          ? '<button onclick="addAffiliatePlaceholder(\'' + key + '\')" class="mt-3 w-full rounded-lg border border-amber-400/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200 hover:bg-amber-500/20">เพิ่มบัญชี Affiliate (บันทึกเป็น Disconnected)</button>'
+                          : '<button disabled title="รอ OAuth App และการอนุมัติสิทธิ์" class="mt-3 w-full cursor-not-allowed rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-500">รอตั้งค่า OAuth / App Review</button>';
+                        return '<article class="rounded-xl border border-slate-700/80 bg-slate-950/50 p-3"><div class="flex items-center justify-between"><h4 class="text-sm font-medium text-white">' + name + '</h4><span class="rounded-full bg-slate-800 px-2 py-1 text-[10px] text-slate-400">' + accounts.length + ' บัญชี</span></div>' + state + action + '</article>';
+                    }).join('') + '</div></section>').join('');
+            } catch (error) {
+                panel.innerHTML = '<div class="rounded-xl border border-rose-500/30 bg-rose-500/10 p-4 text-sm text-rose-200">เชื่อมต่อ Local Gateway ไม่ได้: ' + escapeHtml(error.message) + '<p class="mt-2 text-xs text-slate-400">เปิด OpenBot Local Gateway ที่ http://127.0.0.1:8000 แล้วลองใหม่</p><button onclick="renderSocialAccounts()" class="mt-3 rounded-lg bg-slate-700 px-3 py-2 text-xs text-white">ลองอีกครั้ง</button></div>';
+            }
+        }
+        async function addAffiliatePlaceholder(platform) {
+            const name = prompt('ตั้งชื่อบัญชี/Publisher สำหรับ ' + (platform === 'shopee_affiliate' ? 'Shopee Affiliate' : 'Lazada Affiliate'));
+            if (!name || !name.trim()) return;
+            try {
+                await scRequest('/accounts', {method:'POST', body:JSON.stringify({platform, account_name:name.trim()})});
+                await renderSocialAccounts();
+            } catch (error) { alert(error.message); }
+        }
+        async function disconnectSocialAccount(id) {
+            if (!confirm('ลบบัญชีออกจากรายการนี้หรือไม่? Token ที่จัดเก็บไว้จะถูกล้าง')) return;
+            try { await scRequest('/accounts/' + encodeURIComponent(id), {method:'DELETE'}); await renderSocialAccounts(); }
+            catch (error) { alert(error.message); }
+        }
+        async function renderSocialContent() {
+            const panel = document.getElementById('sc-panel');
+            panel.innerHTML = '<div class="mb-4 flex flex-wrap items-center justify-between gap-2"><div><h3 class="text-sm font-semibold text-white">Content Drafts & Approval Queue</h3><p class="text-xs text-slate-400">สร้างฉบับร่าง ตรวจสอบ และอนุมัติก่อนเผยแพร่</p></div><button onclick="showSocialDraftForm()" class="rounded-lg bg-fuchsia-500/20 px-3 py-2 text-xs text-fuchsia-200 border border-fuchsia-400/30">+ สร้าง Draft</button></div><div id="sc-content-list" class="space-y-3">กำลังโหลด…</div>';
+            try {
+                const data = await scRequest('/content');
+                scItems = data.items || [];
+                const list = document.getElementById('sc-content-list');
+                if (!scItems.length) { list.innerHTML = '<p class="rounded-xl border border-dashed border-slate-700 p-6 text-center text-sm text-slate-500">ยังไม่มี Content Draft</p>'; return; }
+                list.innerHTML = scItems.map(item => '<article class="rounded-xl border border-slate-700 bg-slate-950/60 p-3"><div class="flex flex-wrap items-center justify-between gap-2"><h4 class="text-sm font-medium text-white">' + escapeHtml(item.title) + '</h4><span class="rounded-full bg-slate-800 px-2 py-1 text-[10px] text-amber-200">' + escapeHtml(item.status) + '</span></div><p class="mt-2 whitespace-pre-wrap text-xs text-slate-300">' + escapeHtml(item.body) + '</p><p class="mt-2 text-[10px] text-slate-500">เป้าหมาย: ' + item.platforms.map(escapeHtml).join(', ') + '</p>' +
+                    (item.affiliate_url ? '<p class="mt-1 break-all text-[10px] text-cyan-300">' + escapeHtml(item.affiliate_url) + '</p>' : '') +
+                    (item.status === 'draft' || item.status === 'rejected' ? '<button onclick="submitSocialDraft(\'' + item.id + '\')" class="mt-3 rounded-lg bg-amber-500/15 px-3 py-2 text-xs text-amber-200">ส่งอนุมัติ</button>' : '') +
+                    (item.status === 'pending_approval' ? '<div class="mt-3 flex gap-2"><button onclick="decideSocialDraft(\'' + item.id + '\',\'approve\')" class="rounded-lg bg-emerald-500/15 px-3 py-2 text-xs text-emerald-200">อนุมัติ</button><button onclick="decideSocialDraft(\'' + item.id + '\',\'reject\')" class="rounded-lg bg-rose-500/15 px-3 py-2 text-xs text-rose-200">ปฏิเสธ</button></div>' : '') +
+                    (item.status === 'approved' ? '<p class="mt-3 text-xs text-emerald-300">อนุมัติแล้ว · ยังไม่ได้เผยแพร่ (Publishing adapter ยังไม่เปิดใช้)</p>' : '') + '</article>').join('');
+            } catch (error) { document.getElementById('sc-content-list').textContent = error.message; }
+        }
+        function showSocialDraftForm() {
+            const panel = document.getElementById('sc-panel');
+            const options = scAccounts.map(a => '<option value="' + a.id + '">' + escapeHtml(a.platform + ' · ' + a.account_name + ' [' + a.status + ']') + '</option>').join('');
+            panel.insertAdjacentHTML('afterbegin', '<form id="sc-draft-form" class="mb-4 rounded-xl border border-fuchsia-400/30 bg-slate-950/70 p-4 space-y-3"><h4 class="text-sm font-semibold text-white">สร้าง Content Draft</h4><input name="title" required maxlength="240" placeholder="หัวข้อโพสต์" class="w-full rounded-lg border border-slate-700 bg-slate-900 p-2 text-sm text-white"><textarea name="body" required maxlength="20000" rows="4" placeholder="Caption / เนื้อหา" class="w-full rounded-lg border border-slate-700 bg-slate-900 p-2 text-sm text-white"></textarea><input name="affiliate_url" type="url" placeholder="Affiliate URL (ถ้ามี)" class="w-full rounded-lg border border-slate-700 bg-slate-900 p-2 text-sm text-white"><input name="disclosure" placeholder="ข้อความเปิดเผย Affiliate เช่น ลิงก์นี้เป็นลิงก์ Affiliate" class="w-full rounded-lg border border-slate-700 bg-slate-900 p-2 text-sm text-white"><label class="block text-xs text-slate-300">เลือกบัญชีปลายทาง (เลือกได้หลายบัญชี)</label><select name="account_ids" multiple required class="min-h-24 w-full rounded-lg border border-slate-700 bg-slate-900 p-2 text-xs text-white">' + options + '</select><div class="flex gap-2"><button class="rounded-lg bg-fuchsia-500/20 px-4 py-2 text-xs text-fuchsia-200">บันทึก Draft</button><button type="button" onclick="document.getElementById(\'sc-draft-form\').remove()" class="rounded-lg bg-slate-700 px-4 py-2 text-xs text-white">ยกเลิก</button></div></form>');
+            document.getElementById('sc-draft-form').addEventListener('submit', async event => {
+                event.preventDefault();
+                const form = event.currentTarget, values = new FormData(form);
+                const ids = [...form.querySelector('[name=account_ids]').selectedOptions].map(o => o.value);
+                const platforms = [...new Set(scAccounts.filter(a => ids.includes(a.id)).map(a => a.platform))];
+                try {
+                    await scRequest('/content', {method:'POST', body:JSON.stringify({title:values.get('title'),body:values.get('body'),affiliate_url:values.get('affiliate_url') || null,disclosure:values.get('disclosure'),platforms,account_ids:ids})});
+                    await renderSocialContent();
+                } catch (error) { alert(error.message); }
+            });
+        }
+        async function submitSocialDraft(id) {
+            try { await scRequest('/content/' + id + '/submit', {method:'POST'}); await renderSocialContent(); }
+            catch (error) { alert(error.message); }
+        }
+        async function decideSocialDraft(id, decision) {
+            const actor = prompt('ผู้อนุมัติ (ชื่อผู้ใช้)');
+            if (!actor) return;
+            const reason = decision === 'reject' ? (prompt('เหตุผลที่ปฏิเสธ') || '') : '';
+            try { await scRequest('/content/' + id + '/decision', {method:'POST',body:JSON.stringify({decision,actor,reason})}); await renderSocialContent(); }
+            catch (error) { alert(error.message); }
+        }
+        function renderSocialAccess() {
+            document.getElementById('sc-panel').innerHTML = '<div class="grid gap-3 md:grid-cols-2"><article class="rounded-xl border border-slate-700 bg-slate-950/60 p-4"><h3 class="text-sm font-semibold text-white">Security / Token Vault</h3><p class="mt-2 text-xs leading-6 text-slate-400">Token encryption ใช้ AES-256-GCM และอ่านกุญแจจาก SOCIAL_TOKEN_ENCRYPTION_KEY ในไฟล์ .env ของเครื่องเท่านั้น ห้ามใส่ Secret ใน Browser หรือ GitHub</p><p class="mt-3 text-xs text-amber-300">ยังไม่เปิด OAuth จนกว่าจะตั้งค่า Developer App และ Redirect URI</p></article><article class="rounded-xl border border-slate-700 bg-slate-950/60 p-4"><h3 class="text-sm font-semibold text-white">Platform readiness</h3><ul class="mt-2 space-y-2 text-xs text-slate-400"><li>Facebook / Instagram — รอ Meta App + App Review</li><li>YouTube — รอ Google OAuth Client + YouTube Data API</li><li>TikTok — รอ Content Posting API + video.publish approval + audit</li><li>Shopee Affiliate — รอ Affiliate Open API approval</li><li>Lazada Affiliate — รอยืนยัน Publisher API eligibility / credentials</li></ul></article></div><p class="mt-4 text-xs text-slate-500">ไม่สามารถเชื่อมบัญชีจริงหรือเผยแพร่โพสต์จากหน้าจอนี้จนกว่า OAuth adapters จะได้รับการตั้งค่าและทดสอบ</p>';
+        }
+        function escapeHtml(value) {
+            return String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+        }
+
         // Initialize Lucide Icons
         lucide.createIcons();
 
