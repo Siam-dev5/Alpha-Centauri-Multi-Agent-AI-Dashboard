@@ -42,6 +42,7 @@ async function encrypt(value,env) {
  return b64(new Uint8Array([...iv,...new Uint8Array(data)]));
 }
 async function handle(request,env) {
+ let diagnosticStage="route";
  const url=new URL(request.url), path=url.pathname.replace(/^\/api\/social-commerce/,"")||"/", method=request.method;
  if(method==="OPTIONS") return new Response(null,{status:204,headers:cors(request)});
  if(method==="GET" && path==="/health") {
@@ -50,15 +51,23 @@ async function handle(request,env) {
   return json({service:"Alpha Centauri Social Commerce Cloud API",status:"online",mode:"cloud",setup_ready:setup,admin_initialized:(users?.n||0)>0,publishing_enabled:false,platforms:Object.fromEntries(PLATFORMS.map(p=>[p,"oauth_not_configured"]))},200,cors(request));
  }
  if(method==="POST" && path==="/auth/bootstrap") {
+  diagnosticStage="bootstrap-key-check";
   if(!env.BOOTSTRAP_KEY || (request.headers.get("Authorization")||"").replace(/^Bootstrap\s+/i,"")!==env.BOOTSTRAP_KEY) return json({error:"Invalid bootstrap key"},403,cors(request));
+  diagnosticStage="bootstrap-read-admin-count";
+  try {
   const count=await env.DB.prepare("SELECT COUNT(*) n FROM app_users").first();
   if(count.n>0) return json({error:"Initial administrator already exists"},409,cors(request));
   const body=await request.json();
   if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.email||"") || (body.password||"").length<14) return json({error:"Valid email and password of at least 14 characters are required"},422,cors(request));
+  diagnosticStage="bootstrap-password-hash";
   const id=random(16),salt=random(16),hash=await passwordHash(body.password,salt);
+  diagnosticStage="bootstrap-insert-admin";
   await env.DB.prepare("INSERT INTO app_users(id,email,password_hash,password_salt,created_at) VALUES(?,?,?,?,?)").bind(id,body.email.toLowerCase(),hash,salt,now()).run();
+  diagnosticStage="bootstrap-audit";
   await audit(env,id,"admin_bootstrapped","user",id,body.email);
+  diagnosticStage="bootstrap-create-session";
   return json(await newSession(env,{id,email:body.email.toLowerCase()}),201,cors(request));
+  } catch(e) { e.diagnosticStage=diagnosticStage; throw e; }
  }
  if(method==="POST" && path==="/auth/login") {
   const body=await request.json();
@@ -141,5 +150,5 @@ async function handle(request,env) {
 export default { async fetch(request,env) {
  const headers=cors(request);
  try { return await handle(request,env); }
- catch(e) { console.error("social-commerce-api",e); return json({error:"Internal server error"},500,headers); }
+ catch(e) { console.error("social-commerce-api", {stage:e?.diagnosticStage||"unhandled",name:e?.name||"Error",message:e?.message||"unknown"}); return json({error:"Internal server error",diagnostic_stage:e?.diagnosticStage||"unhandled",diagnostic_message:e?.message||"unknown"},500,headers); }
 }};
