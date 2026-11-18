@@ -32,11 +32,13 @@ This checklist identifies owner actions required before real integrations can be
 - Do not enable API reporting until approval and current endpoint documentation are confirmed.
 
 ## Lazada Affiliate
-- Confirm the current Thailand Affiliate/Publisher API program and account eligibility with Lazada's official affiliate partner portal.
-- Do not substitute Seller Center API credentials or invent endpoints.
-- Enable link generation and reporting only after official access is granted and tested.
+- Confirm the current Thailand Affiliate/Publisher API program and account eligibility with Lazada's official affiliate partner portal. A Lazada Open Platform community answer states that Affiliate API onboarding is guided through the Lazada Affiliate platform, rather than by creating a normal Seller Open Platform app; confirm this directly with partner support before implementation.
+- Lazada Open Platform Seller APIs are intended for professional sellers managing their stores and are not proof of Affiliate API access.
+- Do not substitute Seller Center credentials or invent affiliate endpoints.
+- Enable link generation and reporting only after official affiliate access is granted and tested.
+- Official starting points: https://open.lazada.com/ and https://open.lazada.com/apps/doc/doc?docId=108130&nodeId=10535
 
-## Secret handling
+## Commercial content disclosure\n- TikTok requires creators to turn on its Commercial Content Disclosure setting when promoting a brand, product or service, including content with financial incentives. The application must include a human checklist/confirmation for this platform requirement; a caption disclosure alone must not be treated as a substitute for the TikTok setting.\n- Official guidance: https://ads.tiktok.com/resources/help/article/about-the-content-disclosure-setting-for-creators?lang=en-GB\n\n## Secret handling
 - Store credentials in the local machine's .env or a secrets manager.
 - Use a unique encryption key for token-at-rest encryption.
 - Never upload .env, client secrets, refresh tokens or access tokens to GitHub or chat.
