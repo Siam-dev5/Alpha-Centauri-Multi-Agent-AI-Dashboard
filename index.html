@@ -87,6 +87,10 @@
             stroke-dasharray: 6 6;
             animation: dashFlow 0.8s linear infinite;
         }
+
+        @media (prefers-reduced-motion: reduce) {
+            .animate-pulse, .animate-ping, .animate-edge { animation: none !important; }
+        }
         .pixelated {
             image-rendering: pixelated;
             image-rendering: crisp-edges;
@@ -1285,6 +1289,8 @@
 
                 const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
                 path.setAttribute('d', pathD);
+                path.dataset.from = link.from;
+                path.dataset.to = link.to;
                 path.setAttribute('fill', 'none');
 
                 if (isActive) {
@@ -1306,6 +1312,7 @@
                 const spriteUrl = agent.characterId ? spriteDataUrls[agent.characterId] : null;
 
                 const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+                g.dataset.agentId = agent.id;
                 g.style.cursor = 'pointer';
                 g.setAttribute('pointer-events', 'all');
                 g.addEventListener('click', (e) => {
@@ -1421,7 +1428,102 @@
 
                 nodesLayer.appendChild(g);
             });
+
+            startOrbitalAnimation();
         }
+
+        // ==========================================
+        // 2.1 CONTINUOUS ORBITAL ANIMATION
+        // ==========================================
+        let orbitalAnimationFrame = 0;
+        let orbitalLastTimestamp = 0;
+        const orbitalCenter = { x: 400, y: 325 };
+        const orbitalMotionQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+
+        function getOrbitForAgent(agent, index) {
+            if (!agent._orbit && !['master', 'user', 'openbot'].includes(agent.id)) {
+                const dx = agent.x - orbitalCenter.x;
+                const dy = agent.y - orbitalCenter.y;
+                const radiusX = Math.sqrt(dx * dx + (dy / 0.72) * (dy / 0.72));
+                const radiusY = radiusX * 0.72;
+                agent._orbit = {
+                    radiusX,
+                    radiusY,
+                    angle: Math.atan2(dy / radiusY, dx / radiusX),
+                    speed: 0.032 + (index % 4) * 0.0045,
+                    direction: index % 2 === 0 ? 1 : -1
+                };
+            }
+            return agent._orbit || null;
+        }
+
+        function startOrbitalAnimation() {
+            if (orbitalAnimationFrame || orbitalMotionQuery.matches) return;
+            orbitalLastTimestamp = 0;
+
+            const animate = (timestamp) => {
+                if (orbitalMotionQuery.matches) {
+                    orbitalAnimationFrame = 0;
+                    return;
+                }
+
+                const deltaSeconds = orbitalLastTimestamp
+                    ? Math.min((timestamp - orbitalLastTimestamp) / 1000, 0.05)
+                    : 0;
+                orbitalLastTimestamp = timestamp;
+
+                const positions = new Map();
+                agents.forEach((agent, index) => {
+                    const orbit = getOrbitForAgent(agent, index);
+                    if (!orbit) {
+                        positions.set(agent.id, { x: agent.x, y: agent.y });
+                        return;
+                    }
+
+                    orbit.angle += orbit.speed * orbit.direction * deltaSeconds;
+                    positions.set(agent.id, {
+                        x: orbitalCenter.x + orbit.radiusX * Math.cos(orbit.angle),
+                        y: orbitalCenter.y + orbit.radiusY * Math.sin(orbit.angle)
+                    });
+                });
+
+                const nodesLayer = document.getElementById('nodes-layer');
+                const edgesLayer = document.getElementById('edges-layer');
+                if (nodesLayer && edgesLayer) {
+                    nodesLayer.querySelectorAll('[data-agent-id]').forEach(node => {
+                        const agent = agents.find(item => item.id === node.dataset.agentId);
+                        const position = positions.get(node.dataset.agentId);
+                        if (!agent || !position) return;
+                        const offsetX = position.x - agent.x;
+                        const offsetY = position.y - agent.y;
+                        node.setAttribute('transform', `translate(${offsetX.toFixed(2)} ${offsetY.toFixed(2)})`);
+                    });
+
+                    edgesLayer.querySelectorAll('path[data-from][data-to]').forEach(path => {
+                        const from = positions.get(path.dataset.from);
+                        const to = positions.get(path.dataset.to);
+                        if (!from || !to) return;
+                        const midX = (from.x + to.x) / 2;
+                        const midY = (from.y + to.y) / 2 - 18;
+                        path.setAttribute('d', `M ${from.x.toFixed(2)} ${from.y.toFixed(2)} Q ${midX.toFixed(2)} ${midY.toFixed(2)} ${to.x.toFixed(2)} ${to.y.toFixed(2)}`);
+                    });
+                }
+
+                orbitalAnimationFrame = requestAnimationFrame(animate);
+            };
+
+            orbitalAnimationFrame = requestAnimationFrame(animate);
+        }
+
+        orbitalMotionQuery.addEventListener?.('change', (event) => {
+            if (event.matches && orbitalAnimationFrame) {
+                cancelAnimationFrame(orbitalAnimationFrame);
+                orbitalAnimationFrame = 0;
+                orbitalLastTimestamp = 0;
+            } else if (!event.matches) {
+                startOrbitalAnimation();
+            }
+        });
 
         // ==========================================
         // 2.5 STATUS BAR CHARACTER PICKER (UNIQUE SELECTION)
