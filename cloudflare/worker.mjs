@@ -95,8 +95,14 @@ function metaResultPage(status,message) {
  return new Response("<!doctype html><html lang='th'><meta charset='utf-8'><title>Meta connection</title><body style='font:16px sans-serif;background:#090d1e;color:#e2e8f0;padding:32px'><p>"+(status==="connected"?"เชื่อมต่อ Meta สำเร็จ":"การเชื่อมต่อ Meta ไม่สำเร็จ")+"</p><script>const data="+payload+";if(window.opener){window.opener.postMessage(data,'"+ORIGIN+"');}setTimeout(()=>window.close(),900);</script></body></html>",{status:200,headers:{"Content-Type":"text/html; charset=utf-8","Cache-Control":"no-store","X-Content-Type-Options":"nosniff"}});
 }
 async function graphGet(env,path,params={}) {
- const url=new URL("https://graph.facebook.com/"+graphVersion(env)+"/"+path.replace(/^\/+/,""));
- for(const [key,value] of Object.entries(params)) if(value!==undefined&&value!==null) url.searchParams.set(key,String(value));
+ const url=new URL("https://graph.facebook.com/"+graphVersion(env)+"/"+path.replace(/^\\/+ /,""));
+ const query={...params};
+ if(query.access_token&&env.META_APP_SECRET) {
+  const key=await crypto.subtle.importKey("raw",new TextEncoder().encode(env.META_APP_SECRET),{name:"HMAC",hash:"SHA-256"},false,["sign"]);
+  const proof=await crypto.subtle.sign("HMAC",key,new TextEncoder().encode(String(query.access_token)));
+  query.appsecret_proof=Array.from(new Uint8Array(proof),b=>b.toString(16).padStart(2,"0")).join("");
+ }
+ for(const [key,value] of Object.entries(query)) if(value!==undefined&&value!==null) url.searchParams.set(key,String(value));
  const response=await fetch(url.toString(),{headers:{"Accept":"application/json"}});
  const body=await response.json().catch(()=>({}));
  if(!response.ok||body.error) throw new Error("Meta Graph API request failed: "+safeText(body.error?.message||response.statusText,300));
