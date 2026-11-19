@@ -1622,6 +1622,47 @@
         let stats = { active: 1, completed: 148, tokens: 42800 };
         let attachedImageData = null;
 
+        // Persist character assignments independently from API settings.
+        const CHARACTER_ASSIGNMENTS_KEY = 'alpha_centauri_character_assignments_v1';
+
+        function persistCharacterAssignments() {
+            try {
+                const assignments = {};
+                agents.forEach(agent => {
+                    if (agent.characterId && characterCatalog.some(char => char.id === agent.characterId)) {
+                        assignments[agent.id] = agent.characterId;
+                    }
+                });
+                localStorage.setItem(CHARACTER_ASSIGNMENTS_KEY, JSON.stringify(assignments));
+            } catch (error) {
+                console.warn('Could not persist character assignments:', error);
+                showToast('บันทึกตัวละครไม่สำเร็จ', 'เบราว์เซอร์ไม่อนุญาตให้ใช้ LocalStorage');
+            }
+        }
+
+        function restoreCharacterAssignments() {
+            Object.keys(assignedCharacters).forEach(key => delete assignedCharacters[key]);
+            agents.forEach(agent => { agent.characterId = null; });
+
+            try {
+                const saved = localStorage.getItem(CHARACTER_ASSIGNMENTS_KEY);
+                if (!saved) return;
+                const assignments = JSON.parse(saved);
+                if (!assignments || typeof assignments !== 'object' || Array.isArray(assignments)) return;
+
+                // Restore only known agent/character IDs and enforce one character per agent.
+                Object.entries(assignments).forEach(([agentId, characterId]) => {
+                    const agent = agents.find(item => item.id === agentId);
+                    const character = characterCatalog.find(item => item.id === characterId);
+                    if (!agent || !character || assignedCharacters[characterId]) return;
+                    agent.characterId = characterId;
+                    assignedCharacters[characterId] = agentId;
+                });
+            } catch (error) {
+                console.warn('Could not restore character assignments:', error);
+            }
+        }
+
         // ==========================================
         // 2. RENDER STAR MAP (SVG)
         // ==========================================
@@ -2005,6 +2046,7 @@
             // Assign new character
             agent.characterId = characterId;
             assignedCharacters[characterId] = agent.id;
+            persistCharacterAssignments();
 
             const charObj = characterCatalog.find(c => c.id === characterId);
             showToast('เปลี่ยนไอค่อนดาวสำเร็จ', `${agent.name} ➔ ${charObj ? charObj.name : characterId}`);
@@ -2021,6 +2063,7 @@
                 delete assignedCharacters[agent.characterId];
             }
             agent.characterId = null;
+            persistCharacterAssignments();
 
             showToast('รีเซ็ตไอค่อนดาวแล้ว', `คืนค่าดวงดาวเริ่มต้นให้ ${agent.name}`);
             selectAgent(agent.id);
@@ -2752,6 +2795,7 @@
         // ==========================================
         function init() {
             loadSystemConfig();
+            restoreCharacterAssignments();
             loadAndSliceSprites();
             renderStarMap();
             renderActiveTasks();
