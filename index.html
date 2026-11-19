@@ -866,7 +866,7 @@
         let scItems = [];
         let scActiveTab = 'accounts';
         window.addEventListener('message', event => {
-            if (event.origin !== 'https://siam-dev5.github.io') return;
+            if (event.origin !== 'https://social-api.siamhrbp.com') return;
             if (event.data?.type !== 'ALPHA_CENTAURI_META_OAUTH') return;
             if (event.data.status === 'connected') {
                 alert('เชื่อมต่อ Meta สำเร็จ: ' + (event.data.message || 'บัญชีได้รับการบันทึกแล้ว'));
