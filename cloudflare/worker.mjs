@@ -1,13 +1,5 @@
 const ORIGIN = "https://siam-dev5.github.io";
 const PLATFORMS = ["facebook","instagram","youtube","tiktok","shopee_affiliate","lazada_affiliate"];
-const DEFAULT_META_SCOPES = [
-  "pages_show_list",
-  "pages_read_engagement",
-  "pages_manage_posts",
-  "pages_manage_metadata",
-  "instagram_basic",
-  "instagram_content_publish"
-];
 const now = () => new Date().toISOString();
 const json = (data,status=200,headers={}) => new Response(JSON.stringify(data),{status,headers:{"Content-Type":"application/json; charset=utf-8","Cache-Control":"no-store",...headers}});
 const b64 = (bytes) => btoa(String.fromCharCode(...new Uint8Array(bytes))).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
@@ -21,8 +13,9 @@ const cors = (request) => {
  return headers;
 };
 const graphVersion = (env) => (env.META_GRAPH_API_VERSION||"v27.0").trim();
-const metaScopes = (env) => (env.META_OAUTH_SCOPES||DEFAULT_META_SCOPES.join(",")).split(",").map(x=>x.trim()).filter(Boolean);
-const metaConfigured = (env) => !!(env.META_APP_ID&&env.META_APP_SECRET&&env.META_REDIRECT_URI);
+const metaConfigId = (env,platform) => platform==="instagram"?(env.META_IG_CONFIG_ID||"").trim():(env.META_FB_CONFIG_ID||"").trim();
+const metaConfigured = (env,platform) => !!(env.META_APP_ID&&env.META_APP_SECRET&&env.META_REDIRECT_URI&&metaConfigId(env,platform));
+const metaAnyConfigured = (env) => metaConfigured(env,"instagram")||metaConfigured(env,"facebook");
 const webhookConfigured = (env) => !!(env.META_APP_SECRET&&env.META_WEBHOOK_VERIFY_TOKEN);
 const safeText = (value,max=240) => String(value||"").slice(0,max);
 async function audit(env,userId,type,entityType,entityId,actor,details={}) {
@@ -79,15 +72,15 @@ export async function verifyMetaSignature(rawBody,signature,appSecret) {
  let diff=0; for(let i=0;i<a.length;i++) diff|=a[i]^b[i];
  return diff===0;
 }
-export function buildMetaAuthorizationUrl(env,state) {
- if(!metaConfigured(env)) throw new Error("Meta OAuth is not configured");
+export function buildMetaAuthorizationUrl(env,state,platform="instagram") {
+ const configId=metaConfigId(env,platform);
+ if(!metaConfigured(env,platform)) throw new Error("Meta "+platform+" Unified Login configuration is not configured");
  const url=new URL("https://www.facebook.com/"+graphVersion(env)+"/dialog/oauth");
  url.searchParams.set("client_id",env.META_APP_ID);
+ url.searchParams.set("config_id",configId);
  url.searchParams.set("redirect_uri",env.META_REDIRECT_URI);
  url.searchParams.set("state",state);
  url.searchParams.set("response_type","code");
- url.searchParams.set("scope",metaScopes(env).join(","));
- url.searchParams.set("auth_type","rerequest");
  return url.toString();
 }
 function metaResultPage(status,message) {
@@ -114,18 +107,10 @@ async function exchangeMetaCode(env,code) {
  tokenUrl.searchParams.set("client_secret",env.META_APP_SECRET);
  tokenUrl.searchParams.set("redirect_uri",env.META_REDIRECT_URI);
  tokenUrl.searchParams.set("code",code);
- let response=await fetch(tokenUrl.toString());
- let body=await response.json().catch(()=>({}));
+ const response=await fetch(tokenUrl.toString());
+ const body=await response.json().catch(()=>({}));
  if(!response.ok||body.error||!body.access_token) throw new Error("Meta authorization code exchange failed");
- const longUrl=new URL("https://graph.facebook.com/"+graphVersion(env)+"/oauth/access_token");
- longUrl.searchParams.set("grant_type","fb_exchange_token");
- longUrl.searchParams.set("client_id",env.META_APP_ID);
- longUrl.searchParams.set("client_secret",env.META_APP_SECRET);
- longUrl.searchParams.set("fb_exchange_token",body.access_token);
- response=await fetch(longUrl.toString());
- const longBody=await response.json().catch(()=>({}));
- if(!response.ok||longBody.error||!longBody.access_token) throw new Error("Meta long-lived token exchange failed");
- return {access_token:longBody.access_token,expires_in:Number(longBody.expires_in)||0};
+ return {access_token:body.access_token,expires_in:Number(body.expires_in)||0,token_type:body.token_type||null};
 }
 async function saveMetaAccount(env,user,platform,externalId,name,accessToken,expiresAt,scopes,pictureUrl=null) {
  const id=random(16),encrypted=await encrypt(accessToken,env),stamp=now();
@@ -140,42 +125,45 @@ async function finishMetaOAuth(request,env,url) {
  const code=url.searchParams.get("code");
  if(!state||!code) return metaResultPage("error","Missing authorization response");
  const stateHash=await sha(state);
- const stateRow=await env.DB.prepare("SELECT owner_user_id,expires_at FROM oauth_states WHERE state_hash=? AND platform='meta'").bind(stateHash).first();
+ const stateRow=await env.DB.prepare("SELECT owner_user_id,platform,expires_at FROM oauth_states WHERE state_hash=? AND platform IN ('meta_instagram','meta_facebook')").bind(stateHash).first();
  if(!stateRow||stateRow.expires_at<=now()) return metaResultPage("error","OAuth state is invalid or expired");
  await env.DB.prepare("DELETE FROM oauth_states WHERE state_hash=?").bind(stateHash).run();
+ const platform=stateRow.platform==="meta_instagram"?"instagram":"facebook";
  try {
-  if(!metaConfigured(env)) throw new Error("Meta OAuth credentials are not configured");
+  if(!metaConfigured(env,platform)) throw new Error("Meta "+platform+" configuration is missing");
   const userRow=await env.DB.prepare("SELECT id,email FROM app_users WHERE id=?").bind(stateRow.owner_user_id).first();
   if(!userRow) throw new Error("Social Commerce user no longer exists");
   const token=await exchangeMetaCode(env,code);
-  const scopes=metaScopes(env);
   const expiresAt=token.expires_in>0?new Date(Date.now()+token.expires_in*1000).toISOString():null;
-  const profile=await graphGet(env,"me",{fields:"id,name",access_token:token.access_token});
-  const pages=await graphGet(env,"me/accounts",{fields:"id,name,access_token,tasks,instagram_business_account{id,username,profile_picture_url}",limit:100,access_token:token.access_token});
-  let savedPages=0,savedInstagram=0;
-  let pageCursor=null,pageBatches=0;
-  let pageBatch=pages;
-  while(pageBatch&&pageBatches<20) {
-   for(const page of (pageBatch.data||[])) {
-    if(!page.id||!page.access_token) continue;
-    await saveMetaAccount(env,userRow,"facebook",page.id,page.name||"Facebook Page",page.access_token,expiresAt,scopes);
-    savedPages++;
-    const ig=page.instagram_business_account;
-    if(ig?.id) {
-     await saveMetaAccount(env,userRow,"instagram",ig.id,ig.username||"Instagram Professional",page.access_token,expiresAt,scopes,ig.profile_picture_url||null);
-     savedInstagram++;
-    }
+  let savedAccounts=0;
+  if(platform==="instagram") {
+   const accounts=await graphGet(env,"me/assigned_instagram_accounts",{fields:"id,username,profile_picture_url",limit:100,access_token:token.access_token});
+   for(const account of (accounts.data||[])) {
+    if(!account.id) continue;
+    await saveMetaAccount(env,userRow,"instagram",account.id,account.username||"Instagram Professional",token.access_token,expiresAt,[],account.profile_picture_url||null);
+    savedAccounts++;
    }
-   pageCursor=pageBatch.paging?.cursors?.after||null;
-   if(!pageCursor||!(pageBatch.paging?.next)) break;
-   pageBatch=await graphGet(env,"me/accounts",{fields:"id,name,access_token,tasks,instagram_business_account{id,username,profile_picture_url}",limit:100,after:pageCursor,access_token:token.access_token});
-   pageBatches++;
+  } else {
+   const pages=await graphGet(env,"me/accounts",{fields:"id,name,access_token,tasks",limit:100,access_token:token.access_token});
+   let pageBatch=pages,pageBatches=0;
+   while(pageBatch&&pageBatches<20) {
+    for(const page of (pageBatch.data||[])) {
+     if(!page.id||!page.access_token) continue;
+     await saveMetaAccount(env,userRow,"facebook",page.id,page.name||"Facebook Page",page.access_token,expiresAt,[]);
+     savedAccounts++;
+    }
+    const cursor=pageBatch.paging?.cursors?.after||null;
+    if(!cursor||!pageBatch.paging?.next) break;
+    pageBatch=await graphGet(env,"me/accounts",{fields:"id,name,access_token,tasks",limit:100,after:cursor,access_token:token.access_token});
+    pageBatches++;
+   }
   }
-  await audit(env,userRow.id,"meta_oauth_completed","integration",profile.id,userRow.email,{facebook_pages:savedPages,instagram_accounts:savedInstagram,scopes});
-  return metaResultPage("connected","Facebook Pages: "+savedPages+" · Instagram: "+savedInstagram);
+  if(savedAccounts===0) throw new Error("OAuth completed but no assigned "+platform+" assets were returned. Check the selected Business Login configuration and asset assignments.");
+  await audit(env,userRow.id,"meta_oauth_completed","integration",platform,userRow.email,{platform,accounts:savedAccounts,token_type:token.token_type,expires_at:expiresAt});
+  return metaResultPage("connected",platform==="instagram"?"Instagram accounts: "+savedAccounts:"Facebook Pages: "+savedAccounts);
  } catch(e) {
-  console.error("meta-oauth-callback",{message:safeText(e?.message||"unknown",240)});
-  return metaResultPage("error","Meta connection could not be completed. Check Worker logs and app configuration.");
+  console.error("meta-oauth-callback",{platform,message:safeText(e?.message||"unknown",240)});
+  return metaResultPage("error","Meta connection could not be completed. Check the selected configuration, assigned assets, permissions and Worker logs.");
  }
 }
 async function handleWebhook(request,env,url) {
@@ -208,7 +196,7 @@ async function handle(request,env) {
  if(method==="GET"&&path==="/health") {
   const setup=!!env.BOOTSTRAP_KEY&&!!env.TOKEN_ENCRYPTION_KEY;
   const users=await env.DB.prepare("SELECT COUNT(*) n FROM app_users").first();
-  return json({service:"Alpha Centauri Social Commerce Cloud API",status:"online",mode:"cloud",setup_ready:setup,admin_initialized:(users?.n||0)>0,publishing_enabled:false,meta_oauth_configured:metaConfigured(env),meta_webhook_configured:webhookConfigured(env),meta_redirect_uri:env.META_REDIRECT_URI||null,platforms:Object.fromEntries(PLATFORMS.map(p=>[p,p==="facebook"||p==="instagram"?(metaConfigured(env)?"oauth_ready":"oauth_not_configured"):"oauth_not_configured"]))},200,cors(request));
+  return json({service:"Alpha Centauri Social Commerce Cloud API",status:"online",mode:"cloud",setup_ready:setup,admin_initialized:(users?.n||0)>0,publishing_enabled:false,meta_oauth_configured:metaAnyConfigured(env),meta_instagram_configured:metaConfigured(env,"instagram"),meta_facebook_configured:metaConfigured(env,"facebook"),meta_webhook_configured:webhookConfigured(env),meta_redirect_uri:env.META_REDIRECT_URI||null,platforms:Object.fromEntries(PLATFORMS.map(p=>[p,p==="instagram"?(metaConfigured(env,"instagram")?"oauth_ready":"oauth_not_configured"):p==="facebook"?(metaConfigured(env,"facebook")?"oauth_ready":"oauth_not_configured"):"oauth_not_configured"]))},200,cors(request));
  }
  if(method==="POST"&&path==="/auth/bootstrap") {
   if(!env.BOOTSTRAP_KEY||(request.headers.get("Authorization")||"").replace(/^Bootstrap\s+/i,"")!==env.BOOTSTRAP_KEY) return json({error:"Invalid bootstrap key"},403,cors(request));
@@ -236,10 +224,14 @@ async function handle(request,env) {
   return json({ok:true},200,cors(request));
  }
  if(method==="POST"&&path==="/oauth/meta/start") {
-  if(!metaConfigured(env)) return json({error:"Meta OAuth credentials are not configured on the Cloudflare Worker"},503,cors(request));
+  const body=await request.json().catch(()=>({}));
+  const platform=body.platform==="facebook"?"facebook":body.platform==="instagram"?"instagram":null;
+  if(!platform) return json({error:"Choose instagram or facebook for Meta Unified Login"},422,cors(request));
+  if(!metaConfigured(env,platform)) return json({error:"Meta "+platform+" Login configuration is not configured on the Cloudflare Worker"},503,cors(request));
   const state=random(32),stamp=now(),expiry=new Date(Date.now()+10*60*1000).toISOString();
-  await env.DB.prepare("INSERT INTO oauth_states(state_hash,owner_user_id,platform,expires_at,created_at) VALUES(?,?,'meta',?,?)").bind(await sha(state),user.id,expiry,stamp).run();
-  return json({authorization_url:buildMetaAuthorizationUrl(env,state),expires_at:expiry,redirect_uri:env.META_REDIRECT_URI,scopes:metaScopes(env)},200,cors(request));
+  await env.DB.prepare("DELETE FROM oauth_states WHERE expires_at<=?").bind(stamp).run();
+  await env.DB.prepare("INSERT INTO oauth_states(state_hash,owner_user_id,platform,expires_at,created_at) VALUES(?,?,?,?,?)").bind(await sha(state),user.id,"meta_"+platform,expiry,stamp).run();
+  return json({authorization_url:buildMetaAuthorizationUrl(env,state,platform),expires_at:expiry,redirect_uri:env.META_REDIRECT_URI,platform,login_mode:"unified_login_config_id"},200,cors(request));
  }
  if(method==="GET"&&path==="/accounts") {
   const {results=[]}=await env.DB.prepare("SELECT id,platform,external_account_id,account_name,profile_picture_url,status,scopes_json,token_expires_at,created_at,updated_at FROM social_accounts WHERE owner_user_id=? ORDER BY platform,account_name").bind(user.id).all();
