@@ -147,15 +147,23 @@ async function finishMetaOAuth(request,env,url) {
   const profile=await graphGet(env,"me",{fields:"id,name",access_token:token.access_token});
   const pages=await graphGet(env,"me/accounts",{fields:"id,name,access_token,tasks,instagram_business_account{id,username,profile_picture_url}",limit:100,access_token:token.access_token});
   let savedPages=0,savedInstagram=0;
-  for(const page of (pages.data||[])) {
-   if(!page.id||!page.access_token) continue;
-   await saveMetaAccount(env,userRow,"facebook",page.id,page.name||"Facebook Page",page.access_token,expiresAt,scopes);
-   savedPages++;
-   const ig=page.instagram_business_account;
-   if(ig?.id) {
-    await saveMetaAccount(env,userRow,"instagram",ig.id,ig.username||"Instagram Professional",page.access_token,expiresAt,scopes,ig.profile_picture_url||null);
-    savedInstagram++;
+  let pageCursor=null,pageBatches=0;
+  let pageBatch=pages;
+  while(pageBatch&&pageBatches<20) {
+   for(const page of (pageBatch.data||[])) {
+    if(!page.id||!page.access_token) continue;
+    await saveMetaAccount(env,userRow,"facebook",page.id,page.name||"Facebook Page",page.access_token,expiresAt,scopes);
+    savedPages++;
+    const ig=page.instagram_business_account;
+    if(ig?.id) {
+     await saveMetaAccount(env,userRow,"instagram",ig.id,ig.username||"Instagram Professional",page.access_token,expiresAt,scopes,ig.profile_picture_url||null);
+     savedInstagram++;
+    }
    }
+   pageCursor=pageBatch.paging?.cursors?.after||null;
+   if(!pageCursor||!(pageBatch.paging?.next)) break;
+   pageBatch=await graphGet(env,"me/accounts",{fields:"id,name,access_token,tasks,instagram_business_account{id,username,profile_picture_url}",limit:100,after:pageCursor,access_token:token.access_token});
+   pageBatches++;
   }
   await audit(env,userRow.id,"meta_oauth_completed","integration",profile.id,userRow.email,{facebook_pages:savedPages,instagram_accounts:savedInstagram,scopes});
   return metaResultPage("connected","Facebook Pages: "+savedPages+" · Instagram: "+savedInstagram);
@@ -182,9 +190,9 @@ async function handleWebhook(request,env,url) {
  try { payload=JSON.parse(raw); } catch { return json({error:"Invalid JSON payload"},400); }
  if(!payload||typeof payload.object!=="string"||!Array.isArray(payload.entry)) return json({error:"Invalid Meta webhook shape"},422);
  const eventHash=await sha(raw);
- await env.DB.prepare("INSERT OR IGNORE INTO meta_webhook_events(id,event_hash,object_type,entry_count,payload_json,received_at) VALUES(?,?,?,?,?,?)")
+ const saved=await env.DB.prepare("INSERT OR IGNORE INTO meta_webhook_events(id,event_hash,object_type,entry_count,payload_json,received_at) VALUES(?,?,?,?,?,?)")
   .bind(random(16),eventHash,safeText(payload.object,80),payload.entry.length,JSON.stringify(payload),now()).run();
- return json({ok:true,duplicate:false});
+ return json({ok:true,duplicate:(saved.meta?.changes||0)===0});
 }
 async function handle(request,env) {
  const url=new URL(request.url),path=url.pathname.replace(/^\/api\/social-commerce/,"")||"/",method=request.method;
