@@ -134,6 +134,7 @@ async function finishMetaOAuth(request,env,url) {
  if(!stateRow||stateRow.expires_at<=now()) return metaResultPage("error","OAuth state is invalid or expired");
  await env.DB.prepare("DELETE FROM oauth_states WHERE state_hash=?").bind(stateHash).run();
  const platform=stateRow.platform==="meta_instagram"?"instagram":"facebook";
+ let stage="token_exchange";
  try {
   if(!metaConfigured(env,platform)) throw new Error("Meta "+platform+" configuration is missing");
   const userRow=await env.DB.prepare("SELECT id,email FROM app_users WHERE id=?").bind(stateRow.owner_user_id).first();
@@ -141,7 +142,6 @@ async function finishMetaOAuth(request,env,url) {
   const token=await exchangeMetaCode(env,code);
   const expiresAt=token.expires_in>0?new Date(Date.now()+token.expires_in*1000).toISOString():null;
   let savedAccounts=0;
-  let stage="token_exchange";
   if(platform==="instagram") {
    stage="instagram_asset_discovery";
    const accounts=await graphGet(env,"me/assigned_instagram_accounts",{fields:"id,username,profile_picture_url",limit:100,access_token:token.access_token});
