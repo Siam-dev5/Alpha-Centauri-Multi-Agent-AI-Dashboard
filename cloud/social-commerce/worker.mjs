@@ -23,9 +23,21 @@ async function sessionUser(request,env) {
  if(!row || row.expires_at<=now()) return null;
  return {id:row.id,email:row.email};
 }
-async function passwordHash(password,salt) {
- const key=await crypto.subtle.importKey("raw",new TextEncoder().encode(password),"PBKDF2",false,["deriveBits"]);
- return b64(await crypto.subtle.deriveBits({name:"PBKDF2",salt:unb64(salt),iterations:310000,hash:"SHA-256"},key,256));
+async function passwordHash(password,salt,env) {
+ // Cloudflare Workers caps each PBKDF2 operation at 100,000 iterations.
+ // Three chained rounds retain an approximately 300k work factor without
+ // exceeding the runtime ceiling. A stable Worker-only pepper prevents
+ // database-only offline guessing if the D1 database is exposed.
+ const pepper=unb64(env.TOKEN_ENCRYPTION_KEY);
+ const pepperKey=await crypto.subtle.importKey("raw",pepper,{name:"HMAC",hash:"SHA-256"},false,["sign"]);
+ const prehash=await crypto.subtle.sign("HMAC",pepperKey,new TextEncoder().encode(password));
+ let material=prehash;
+ const saltBytes=unb64(salt);
+ for(let round=0;round<3;round++) {
+  const key=await crypto.subtle.importKey("raw",material,"PBKDF2",false,["deriveBits"]);
+  material=await crypto.subtle.deriveBits({name:"PBKDF2",salt:new Uint8Array([...saltBytes,round]),iterations:100000,hash:"SHA-256"},key,256);
+ }
+ return b64(material);
 }
 async function newSession(env,user) {
  const token=random(48), expiry=new Date(Date.now()+7*86400000).toISOString();
@@ -60,7 +72,7 @@ async function handle(request,env) {
   const body=await request.json();
   if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.email||"") || (body.password||"").length<14) return json({error:"Valid email and password of at least 14 characters are required"},422,cors(request));
   diagnosticStage="bootstrap-password-hash";
-  const id=random(16),salt=random(16),hash=await passwordHash(body.password,salt);
+  const id=random(16),salt=random(16),hash=await passwordHash(body.password,salt,env);
   diagnosticStage="bootstrap-insert-admin";
   await env.DB.prepare("INSERT INTO app_users(id,email,password_hash,password_salt,created_at) VALUES(?,?,?,?,?)").bind(id,body.email.toLowerCase(),hash,salt,now()).run();
   diagnosticStage="bootstrap-audit";
@@ -72,7 +84,7 @@ async function handle(request,env) {
  if(method==="POST" && path==="/auth/login") {
   const body=await request.json();
   const user=await env.DB.prepare("SELECT id,email,password_hash,password_salt FROM app_users WHERE email=?").bind((body.email||"").toLowerCase()).first();
-  if(!user || await passwordHash(body.password||"",user.password_salt)!==user.password_hash) return json({error:"Invalid email or password"},401,cors(request));
+  if(!user || await passwordHash(body.password||"",user.password_salt,env)!==user.password_hash) return json({error:"Invalid email or password"},401,cors(request));
   return json(await newSession(env,user),200,cors(request));
  }
  const user=await sessionUser(request,env);
