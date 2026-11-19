@@ -109,7 +109,12 @@ async function exchangeMetaCode(env,code) {
  tokenUrl.searchParams.set("code",code);
  const response=await fetch(tokenUrl.toString());
  const body=await response.json().catch(()=>({}));
- if(!response.ok||body.error||!body.access_token) throw new Error("Meta authorization code exchange failed");
+ if(!response.ok||body.error||!body.access_token) {
+  const metaMessage=safeText(body.error?.message||response.statusText||"unknown Meta token exchange error",240);
+  const metaCode=body.error?.code?"; code "+body.error.code:"";
+  const metaSubcode=body.error?.error_subcode?"; subcode "+body.error.error_subcode:"";
+  throw new Error("Meta authorization code exchange failed: "+metaMessage+metaCode+metaSubcode);
+}
  return {access_token:body.access_token,expires_in:Number(body.expires_in)||0,token_type:body.token_type||null};
 }
 async function saveMetaAccount(env,user,platform,externalId,name,accessToken,expiresAt,scopes,pictureUrl=null) {
@@ -129,6 +134,7 @@ async function finishMetaOAuth(request,env,url) {
  if(!stateRow||stateRow.expires_at<=now()) return metaResultPage("error","OAuth state is invalid or expired");
  await env.DB.prepare("DELETE FROM oauth_states WHERE state_hash=?").bind(stateHash).run();
  const platform=stateRow.platform==="meta_instagram"?"instagram":"facebook";
+ let stage="token_exchange";
  try {
   if(!metaConfigured(env,platform)) throw new Error("Meta "+platform+" configuration is missing");
   const userRow=await env.DB.prepare("SELECT id,email FROM app_users WHERE id=?").bind(stateRow.owner_user_id).first();
@@ -137,6 +143,7 @@ async function finishMetaOAuth(request,env,url) {
   const expiresAt=token.expires_in>0?new Date(Date.now()+token.expires_in*1000).toISOString():null;
   let savedAccounts=0;
   if(platform==="instagram") {
+   stage="instagram_asset_discovery";
    const accounts=await graphGet(env,"me/assigned_instagram_accounts",{fields:"id,username,profile_picture_url",limit:100,access_token:token.access_token});
    for(const account of (accounts.data||[])) {
     if(!account.id) continue;
@@ -144,11 +151,13 @@ async function finishMetaOAuth(request,env,url) {
     savedAccounts++;
    }
   } else {
+   stage="facebook_page_discovery";
    const pages=await graphGet(env,"me/accounts",{fields:"id,name,access_token,tasks",limit:100,access_token:token.access_token});
    let pageBatch=pages,pageBatches=0;
    while(pageBatch&&pageBatches<20) {
     for(const page of (pageBatch.data||[])) {
      if(!page.id||!page.access_token) continue;
+     stage="persist_facebook_page";
      await saveMetaAccount(env,userRow,"facebook",page.id,page.name||"Facebook Page",page.access_token,expiresAt,[]);
      savedAccounts++;
     }
@@ -158,12 +167,21 @@ async function finishMetaOAuth(request,env,url) {
     pageBatches++;
    }
   }
-  if(savedAccounts===0) throw new Error("OAuth completed but no assigned "+platform+" assets were returned. Check the selected Business Login configuration and asset assignments.");
+  if(savedAccounts===0) {
+   stage="empty_asset_result";
+   throw new Error("OAuth completed but no assigned "+platform+" assets were returned. Check the selected Business Login configuration and asset assignments.");
+  }
   await audit(env,userRow.id,"meta_oauth_completed","integration",platform,userRow.email,{platform,accounts:savedAccounts,token_type:token.token_type,expires_at:expiresAt});
   return metaResultPage("connected",platform==="instagram"?"Instagram accounts: "+savedAccounts:"Facebook Pages: "+savedAccounts);
  } catch(e) {
-  console.error("meta-oauth-callback",{platform,message:safeText(e?.message||"unknown",240)});
-  return metaResultPage("error","Meta connection could not be completed. Check the selected configuration, assigned assets, permissions and Worker logs.");
+  const diagnostic=safeText(e?.message||"unknown Meta OAuth error",300);
+  console.error("meta-oauth-callback",{platform,stage,message:diagnostic});
+  try {
+   await audit(env,stateRow.owner_user_id,"meta_oauth_failed","integration",platform,"meta-oauth-callback",{platform,stage,error:diagnostic});
+  } catch(auditError) {
+   console.error("meta-oauth-diagnostic-write-failed",{message:safeText(auditError?.message||"unknown",160)});
+  }
+  return metaResultPage("error","Meta connection failed during "+stage+". Diagnostic has been recorded for the system administrator.");
  }
 }
 async function handleWebhook(request,env,url) {
