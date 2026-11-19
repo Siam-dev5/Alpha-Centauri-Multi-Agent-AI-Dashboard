@@ -25,3 +25,12 @@ jobs:
         run: python -m compileall -q openbot_server.py tests
       - name: Run tests
         run: pytest -q
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Test Meta Worker and dashboard JavaScript
+        run: node --test tests/meta_worker.test.mjs tests/index_inline_scripts.test.mjs
+      - name: Check Cloudflare Worker syntax
+        run: node --check cloudflare/worker.mjs
