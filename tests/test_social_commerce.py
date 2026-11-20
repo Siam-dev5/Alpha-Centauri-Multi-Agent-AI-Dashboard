@@ -110,3 +110,18 @@ def test_affiliate_content_requires_disclosure(monkeypatch, tmp_path):
     })
     assert response.status_code == 422
     assert "disclosure" in response.text.lower()
+
+def test_worker_root_is_public_health_endpoint():
+    worker_source = (Path(__file__).resolve().parents[1] / "cloudflare" / "worker.mjs").read_text(encoding="utf-8")
+    assert 'path==="/"||path==="/health"' in worker_source
+
+
+def test_dashboard_simulation_never_claims_youtube_publication():
+    dashboard = (Path(__file__).resolve().parents[1] / "index.html").read_text(encoding="utf-8")
+    start = dashboard.index("if (type === 'youtube')")
+    end = dashboard.index("} else if (type === 'bugfix')", start)
+    youtube_simulation = dashboard[start:end]
+    assert "ไม่ได้เผยแพร่จริง" in youtube_simulation
+    assert "ไม่มี YouTube Post ID" in youtube_simulation
+    assert "อัปโหลดคลิปลงช่อง YouTube เรียบร้อยแล้วครับ" not in youtube_simulation
+    assert "รายงานยอดอัปโหลดคลิป YouTube รอบเช้าสำเร็จ" not in dashboard
