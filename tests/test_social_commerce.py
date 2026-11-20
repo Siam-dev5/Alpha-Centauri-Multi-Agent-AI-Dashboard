@@ -133,3 +133,12 @@ def test_meta_oauth_persists_only_granted_permissions():
     assert 'item.status==="granted"' in worker_source
     assert 'expiresAt,grantedScopes' in worker_source
     assert 'stage="permission_discovery"' in worker_source
+
+def test_facebook_publish_is_approval_and_permission_gated():
+    worker_source = (Path(__file__).resolve().parents[1] / "cloudflare" / "worker.mjs").read_text(encoding="utf-8")
+    assert 'path.match(/^\\/content\\/([a-zA-Z0-9_-]+)\\/publish\\/' in worker_source
+    assert 'item.status!=="approved"' in worker_source
+    assert 'page_tasks_json' in worker_source
+    assert 'publish_records' in worker_source
+    assert 'image.size>8*1024*1024' in worker_source
+    assert 'Only JPEG and PNG images are supported' in worker_source
