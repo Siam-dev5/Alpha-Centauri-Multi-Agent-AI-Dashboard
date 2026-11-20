@@ -211,7 +211,7 @@ async function handle(request,env) {
  if(method==="OPTIONS") return new Response(null,{status:204,headers:cors(request)});
  if(path==="/webhooks/meta") return handleWebhook(request,env,url);
  if(method==="GET"&&path==="/oauth/meta/callback") return finishMetaOAuth(request,env,url);
- if(method==="GET"&&path==="/health") {
+ if(method==="GET"&&(path==="/"||path==="/health")) {
   const setup=!!env.BOOTSTRAP_KEY&&!!env.TOKEN_ENCRYPTION_KEY;
   const users=await env.DB.prepare("SELECT COUNT(*) n FROM app_users").first();
   return json({service:"Alpha Centauri Social Commerce Cloud API",status:"online",mode:"cloud",setup_ready:setup,admin_initialized:(users?.n||0)>0,publishing_enabled:false,meta_oauth_configured:metaAnyConfigured(env),meta_instagram_configured:metaConfigured(env,"instagram"),meta_facebook_configured:metaConfigured(env,"facebook"),meta_webhook_configured:webhookConfigured(env),meta_redirect_uri:env.META_REDIRECT_URI||null,platforms:Object.fromEntries(PLATFORMS.map(p=>[p,p==="instagram"?(metaConfigured(env,"instagram")?"oauth_ready":"oauth_not_configured"):p==="facebook"?(metaConfigured(env,"facebook")?"oauth_ready":"oauth_not_configured"):"oauth_not_configured"]))},200,cors(request));
