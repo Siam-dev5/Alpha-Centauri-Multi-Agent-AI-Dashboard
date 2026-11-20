@@ -148,3 +148,7 @@ def test_cloud_health_does_not_claim_publishing_without_ready_pages():
     assert 'publishing_enabled:publishReadyAccounts>0' in worker_source
     assert 'publishing_adapter_enabled:true' in worker_source
     assert 'publish_ready_accounts:publishReadyAccounts' in worker_source
+
+def test_facebook_oauth_persists_page_tasks():
+    worker_source = (Path(__file__).resolve().parents[1] / "cloudflare" / "worker.mjs").read_text(encoding="utf-8")
+    assert 'page.access_token,expiresAt,grantedScopes,null,Array.isArray(page.tasks)?page.tasks:[]' in worker_source
