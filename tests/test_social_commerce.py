@@ -142,3 +142,9 @@ def test_facebook_publish_is_approval_and_permission_gated():
     assert 'publish_records' in worker_source
     assert 'image.size>8*1024*1024' in worker_source
     assert 'Only JPEG and PNG images are supported' in worker_source
+
+def test_cloud_health_does_not_claim_publishing_without_ready_pages():
+    worker_source = (Path(__file__).resolve().parents[1] / "cloudflare" / "worker.mjs").read_text(encoding="utf-8")
+    assert 'publishing_enabled:publishReadyAccounts>0' in worker_source
+    assert 'publishing_adapter_enabled:true' in worker_source
+    assert 'publish_ready_accounts:publishReadyAccounts' in worker_source
