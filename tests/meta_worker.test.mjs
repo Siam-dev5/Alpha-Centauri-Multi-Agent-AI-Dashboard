@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { verifyMetaSignature, buildMetaAuthorizationUrl } from "../cloudflare/worker.mjs";
+import { verifyMetaSignature, buildMetaAuthorizationUrl, facebookPublishReadiness } from "../cloudflare/worker.mjs";
 import { createHmac } from "node:crypto";
 
 test("Meta webhook signature accepts the exact raw body", async () => {
@@ -53,4 +53,11 @@ test("Meta authorization refuses missing configuration IDs or app credentials", 
   assert.throws(() => buildMetaAuthorizationUrl({
     META_APP_ID: "123", META_APP_SECRET: "secret", META_REDIRECT_URI: "https://example.com/callback"
   }, "state", "facebook"), /not configured/);
+});
+
+test("Facebook publishing requires the publish permission and a Page content task", () => {
+  assert.deepEqual(facebookPublishReadiness(["pages_manage_posts"], ["CREATE_CONTENT"]), {ready:true,missing:[]});
+  assert.deepEqual(facebookPublishReadiness(["pages_read_engagement"], ["CREATE_CONTENT"]), {ready:false,missing:["pages_manage_posts"]});
+  assert.deepEqual(facebookPublishReadiness(["pages_manage_posts"], ["ANALYZE"]), {ready:false,missing:["Page task CREATE_CONTENT"]});
+  assert.equal(facebookPublishReadiness(["pages_manage_posts"], ["MANAGE"]).ready, true);
 });
