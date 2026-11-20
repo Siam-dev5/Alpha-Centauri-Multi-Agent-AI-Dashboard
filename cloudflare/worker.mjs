@@ -287,7 +287,10 @@ async function handle(request,env) {
   const status=url.searchParams.get("status");
   const q=status?env.DB.prepare("SELECT * FROM content_items WHERE owner_user_id=? AND status=? ORDER BY updated_at DESC").bind(user.id,status):env.DB.prepare("SELECT * FROM content_items WHERE owner_user_id=? ORDER BY updated_at DESC").bind(user.id);
   const {results=[]}=await q.all();
-  return json({items:results.map(x=>({...x,platforms:JSON.parse(x.platforms_json),account_ids:JSON.parse(x.account_ids_json)}))},200,cors(request));
+  const published=await env.DB.prepare("SELECT p.content_id,p.status,p.external_post_id,p.permalink,p.error_message,p.updated_at,a.account_name FROM publish_records p JOIN social_accounts a ON a.id=p.account_id WHERE p.owner_user_id=? ORDER BY p.created_at DESC").bind(user.id).all();
+  const byContent=new Map();
+  for(const record of published.results||[]) { if(!byContent.has(record.content_id)) byContent.set(record.content_id,[]); byContent.get(record.content_id).push(record); }
+  return json({items:results.map(x=>({...x,platforms:JSON.parse(x.platforms_json),account_ids:JSON.parse(x.account_ids_json),publications:byContent.get(x.id)||[]}))},200,cors(request));
  }
  if(method==="POST"&&path==="/content") {
   const b=await request.json();
@@ -327,10 +330,10 @@ async function handle(request,env) {
    if(existing.status==="published") return json({status:"published",post_id:existing.external_post_id,permalink:existing.permalink,idempotent:true},200,cors(request));
    return json({error:"A publish attempt already exists for this content and Page; check its status before retrying",publish_status:existing.status,detail:existing.error_message||null},409,cors(request));
   }
+  const pageToken=await decrypt(account.encrypted_access_token,env);
   const recordId=random(16),stamp=now();
   await env.DB.prepare("INSERT INTO publish_records(id,owner_user_id,content_id,account_id,platform,idempotency_key,status,created_at,updated_at) VALUES(?,?,?,?,?,?,'publishing',?,?)")
    .bind(recordId,user.id,contentId,accountId,"facebook",idempotencyKey,stamp,stamp).run();
-  const pageToken=await decrypt(account.encrypted_access_token,env);
   const body=new FormData();
   body.set("access_token",pageToken);
   if(env.META_APP_SECRET) {
