@@ -30,7 +30,7 @@ The Dashboard now includes a Social & Affiliate workspace backed by local FastAP
 - Audit events for account and content lifecycle changes.
 - AES-256-GCM token encryption helper using a key held only in local environment configuration.
 
-**Important:** This is the secure foundation, not a claim that platform accounts are already connected. OAuth adapters, real publishing and affiliate reporting remain disabled until developer credentials, platform permissions and required reviews are completed. The UI must not represent placeholder accounts as connected or show fabricated clicks, orders or commissions.
+**Important:** This is the secure foundation, not a claim that platform accounts are already connected. Facebook Page photo publishing is implemented behind Human Approval and live `pages_manage_posts` / Page-task checks. Instagram, YouTube, TikTok and Affiliate publishing/reporting remain disabled until their separate adapters, developer credentials, permissions and required reviews are completed. The UI must not represent placeholder accounts as connected or show fabricated clicks, orders or commissions.
 
 See [Social & Commerce architecture](docs/social-commerce-v1.3.md) and [platform access checklist](docs/platform-access-checklist.md).
 

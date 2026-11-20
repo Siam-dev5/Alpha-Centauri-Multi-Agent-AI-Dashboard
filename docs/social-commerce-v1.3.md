@@ -23,13 +23,13 @@ Affiliate marketing is the active business model. The user promotes third-party 
 - Simulation mode is never a source of business analytics.
 
 ## Platform adapter strategy
-- Meta: Facebook Pages and Instagram Professional publishing, subject to app configuration, account type, Page tasks, permissions and review.
+- Meta Facebook Pages: image publishing is implemented through the Page Photos Graph API after Human Approval. Each Page must pass the live `pages_manage_posts` and `CREATE_CONTENT`/`MANAGE` task checks. Instagram Professional publishing remains deferred until its media-container/publish adapter and account-specific permissions are implemented.
 - YouTube: OAuth 2.0 required for uploads and private channel data; API key alone is not sufficient.
 - TikTok: Content Posting API with approved scopes and app audit. Unaudited clients are restricted to private visibility.
 - Shopee and Lazada: treat Affiliate/Publisher APIs separately from Seller APIs. Verify Thailand eligibility, partner approval, scopes, link generation and report endpoints before enabling each adapter.
 - If a platform does not grant an API capability, present a clearly labeled manual workflow rather than fabricating automation.
 
-## Human approval policy
+## Facebook Page publishing (first live adapter)\n- Upload a JPEG or PNG (maximum 8 MB) with an approved content item.\n- The Worker checks the content approval state, approved target account, stored Page access token, `pages_manage_posts`, and Page task `CREATE_CONTENT` or `MANAGE`.\n- Publish through `/{page-id}/photos` using the Page token; tokens never reach the browser.\n- Store the external Post ID and permalink in `publish_records` and the audit log.\n- Enforce one publication record per content/Page. If the network result is ambiguous, mark it `unknown` and block automatic retry to prevent duplicate public posts.\n\n## Human approval policy
 1. Agent creates a draft or campaign proposal.
 2. User reviews target accounts, media, caption, affiliate disclosure and links.
 3. User approves the exact content and destinations.
@@ -51,4 +51,4 @@ Affiliate marketing is the active business model. The user promotes third-party 
 - Phase E: end-to-end testing with real accounts, then production release.
 
 ## Current limitation
-No social or marketplace account is connected by this commit. OAuth credentials, encryption key and platform approvals are external prerequisites. The foundation must not imply that publication or affiliate reporting is already live.
+Facebook Page image publishing is available only for OAuth-connected Pages that pass live permission and Page-task checks. Existing accounts with empty permission metadata must reconnect after the permission-discovery fix. Instagram, YouTube, TikTok, Shopee Affiliate and Lazada Affiliate publishing/reporting remain disabled until their separate adapters and official access reviews are completed. A successful CI run is not a real-account publication test.
