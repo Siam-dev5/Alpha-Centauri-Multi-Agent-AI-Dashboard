@@ -262,12 +262,12 @@
             </div>
             <div class="px-3 py-1.5 rounded-xl bg-space-900/90 border border-slate-800 hidden md:flex items-center gap-2">
                 <i data-lucide="check-circle-2" class="w-3.5 h-3.5 text-emerald-400"></i>
-                <span class="text-slate-400">สำเร็จแล้ว:</span>
+                <span class="text-slate-400">สำเร็จ (จำลอง):</span>
                 <span class="font-mono font-semibold text-emerald-300" id="stat-completed">148</span>
             </div>
             <div class="px-3 py-1.5 rounded-xl bg-space-900/90 border border-slate-800 hidden xl:flex items-center gap-2">
                 <i data-lucide="zap" class="w-3.5 h-3.5 text-purple-400"></i>
-                <span class="text-slate-400">Tokens:</span>
+                <span class="text-slate-400">Tokens (จำลอง):</span>
                 <span class="font-mono font-semibold text-purple-300" id="stat-tokens">42.8K</span>
             </div>
             <button type="button" onclick="openSocialCommerce()" class="px-3 py-1.5 rounded-xl bg-gradient-to-r from-fuchsia-500/20 to-rose-500/20 hover:from-fuchsia-500/30 hover:to-rose-500/30 border border-fuchsia-500/40 text-fuchsia-200 font-medium flex items-center gap-1.5 shadow-lg shadow-fuchsia-500/10 transition">
@@ -1648,10 +1648,8 @@
         let selectedAgentId = null;
         let currentFilter = 'ALL';
         let logs = [];
-        let activeTasks = [
-            { id: 'TSK-DEV-402', title: 'ปรับปรุงความเร็ว API ระบบหลังบ้าน', owner: 'โปรแกรมเมอร์ 1', progress: 75 }
-        ];
-        let stats = { active: 1, completed: 148, tokens: 42800 };
+        let activeTasks = [];
+        let stats = { active: 0, completed: 0, tokens: 0 };
         let attachedImageData = null;
 
         // Persist character assignments independently from API settings.
@@ -2606,11 +2604,40 @@
         function triggerPreset(type) {
             if (type === 'youtube') {
                 // Create synthetic canvas image to simulate attached reference image
-                const mockImg = createMockReferenceImage('แบบป้ายไวนิลร้านกาแฟ_Ref.jpg', '#3b0764', 'ตัวอย่างดีไซน์ป้ายหน้าร้าน');
-                appendChatBubble('user', 'ช่วยทำคลิป YouTube รีวิวงานป้ายจากรูปตัวอย่างนี้ พร้อมตั้งเวลาลงช่องให้ด้วย', mockImg);
-                runWorkflowSimulation('youtube', 'ทำคลิป YouTube รีวิวงานป้ายจากรูปตัวอย่าง', true);
+                    if (type === 'youtube') {
+                activeTasks.unshift({ id: taskId, title: 'จำลองขั้นตอนเตรียมคลิป YouTube (ไม่เผยแพร่)', owner: 'Creative Bot', progress: 10 });
+                renderActiveTasks();
+                updateStatsUI();
+
+                const stages = [
+                    ['master', 'creative', 'Creative Bot', 'จำลองการเตรียมสคริปต์และ Prompt'],
+                    ['creative', 'graphic', 'Graphic Design', 'จำลองการเตรียมภาพประกอบ (ไม่ได้สร้างไฟล์จริง)'],
+                    ['graphic', 'video', 'Video Editor', 'จำลองขั้นตอนตัดต่อ (ไม่ได้สร้างไฟล์วิดีโอจริง)'],
+                    ['video', 'social', 'แอดมินโซเชียล', 'จำลองการส่งต่องาน (ไม่ได้เรียก YouTube API)']
+                ];
+                stages.forEach((stage, index) => {
+                    setTimeout(() => {
+                        const [from, to, owner, message] = stage;
+                        if (index > 0) setConnection(stages[index - 1][0], stages[index - 1][1], false);
+                        setConnection(from, to, true);
+                        updateAgentState(to, 'WORKING', taskId, message);
+                        updateTaskProgress(taskId, owner, Math.min(20 + (index + 1) * 18, 90));
+                        addActivityLog(from, owner, message, 'SIMULATION', taskId);
+                    }, 900 + index * 1200);
+                });
+
+                setTimeout(() => {
+                    setConnection('video', 'social', false);
+                    updateAgentState('social', 'IDLE', '-', 'จบการจำลอง · ไม่ได้เผยแพร่ไปยัง YouTube');
+                    activeTasks = activeTasks.filter(task => task.id !== taskId);
+                    renderActiveTasks();
+                    updateStatsUI();
+                    addActivityLog('แอดมินโซเชียล', 'Master Bot', 'SIMULATION ONLY: ไม่มีการเรียก YouTube API และไม่มี Post ID', 'SIMULATION', taskId);
+                    appendChatBubble('bot', `<span class="text-amber-300 font-bold">โหมดจำลองเท่านั้น</span> งาน <span class="font-mono">${taskId}</span> จบขั้นตอนจำลองแล้ว <b>ไม่มีการอัปโหลดหรือเผยแพร่จริง</b> และไม่มี YouTube Post ID`);
+                    showToast('จบการจำลอง', 'ไม่ได้เรียก YouTube API · ไม่มีการเผยแพร่จริง');
+                }, 6500);
+
             } else if (type === 'bugfix') {
-                const mockImg = createMockReferenceImage('Screenshot_Error_500.png', '#450a0a', 'Error 500: Checkout API Timeout');
                 appendChatBubble('user', 'หน้าเว็บสั่งซื้อขึ้น Error ตามภาพนี้ ช่วยให้ทีม Dev เช็คและแก้บั๊กด่วน', mockImg);
                 runWorkflowSimulation('bugfix', 'แก้บั๊กหน้าเว็บจากภาพ Error 500', true);
             } else if (type === 'summary') {
@@ -2835,9 +2862,7 @@
             connectOpenBotWebSocket();
 
             // Seed initial realistic logs
-            addActivityLog('โปรแกรมเมอร์ 1', 'QA / Test Bot', 'รัน Benchmark ตรวจสอบความเร็วฐานข้อมูล SQLite Local', 'DEV', 'TSK-DEV-402');
-            addActivityLog('แอดมินโซเชียล', 'Master Bot', 'รายงานยอดอัปโหลดคลิป YouTube รอบเช้าสำเร็จ (2/2 คลิป)', 'MEDIA', 'TSK-MED-109');
-            addActivityLog('OpenBot Gateway', 'Master Bot', 'ซิงก์สถานะระบบ Local สำเร็จ พร้อมรับคำสั่งภาพและข้อความ', 'CORE', 'GW-LOCAL-8000');
+            addActivityLog('OpenBot Gateway', 'Master Bot', 'Dashboard พร้อมใช้งาน · สถานะงานภายนอกต้องตรวจจาก API จริง', 'CORE', 'GW-LOCAL-8000');
         }
 
         window.addEventListener('DOMContentLoaded', init);
