@@ -121,7 +121,7 @@ def test_dashboard_simulation_never_claims_youtube_publication():
     start = dashboard.index("if (type === 'youtube')")
     end = dashboard.index("} else if (type === 'bugfix')", start)
     youtube_simulation = dashboard[start:end]
-    assert "ไม่ได้เผยแพร่จริง" in youtube_simulation
+    assert "ไม่มีการเผยแพร่จริง" in youtube_simulation
     assert "ไม่มี YouTube Post ID" in youtube_simulation
     assert "อัปโหลดคลิปลงช่อง YouTube เรียบร้อยแล้วครับ" not in youtube_simulation
     assert "รายงานยอดอัปโหลดคลิป YouTube รอบเช้าสำเร็จ" not in dashboard
