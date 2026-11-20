@@ -101,6 +101,11 @@ async function graphGet(env,path,params={}) {
  if(!response.ok||body.error) throw new Error("Meta Graph API request failed: "+safeText(body.error?.message||response.statusText,300));
  return body;
 }
+async function grantedMetaPermissions(env,accessToken) {
+ const result=await graphGet(env,"me/permissions",{access_token:accessToken});
+ if(!Array.isArray(result.data)) throw new Error("Meta permissions response was incomplete; reconnect the account and try again.");
+ return result.data.filter(item=>item&&item.status==="granted"&&typeof item.permission==="string").map(item=>item.permission).sort();
+}
 async function exchangeMetaCode(env,code) {
  const tokenUrl=new URL("https://graph.facebook.com/"+graphVersion(env)+"/oauth/access_token");
  tokenUrl.searchParams.set("client_id",env.META_APP_ID);
@@ -141,13 +146,15 @@ async function finishMetaOAuth(request,env,url) {
   if(!userRow) throw new Error("Social Commerce user no longer exists");
   const token=await exchangeMetaCode(env,code);
   const expiresAt=token.expires_in>0?new Date(Date.now()+token.expires_in*1000).toISOString():null;
+  stage="permission_discovery";
+  const grantedScopes=await grantedMetaPermissions(env,token.access_token);
   let savedAccounts=0;
   if(platform==="instagram") {
    stage="instagram_asset_discovery";
    const accounts=await graphGet(env,"me/assigned_instagram_accounts",{fields:"id,username,profile_picture_url",limit:100,access_token:token.access_token});
    for(const account of (accounts.data||[])) {
     if(!account.id) continue;
-    await saveMetaAccount(env,userRow,"instagram",account.id,account.username||"Instagram Professional",token.access_token,expiresAt,[],account.profile_picture_url||null);
+    await saveMetaAccount(env,userRow,"instagram",account.id,account.username||"Instagram Professional",token.access_token,expiresAt,grantedScopes,account.profile_picture_url||null);
     savedAccounts++;
    }
   } else {
@@ -158,7 +165,7 @@ async function finishMetaOAuth(request,env,url) {
     for(const page of (pageBatch.data||[])) {
      if(!page.id||!page.access_token) continue;
      stage="persist_facebook_page";
-     await saveMetaAccount(env,userRow,"facebook",page.id,page.name||"Facebook Page",page.access_token,expiresAt,[]);
+     await saveMetaAccount(env,userRow,"facebook",page.id,page.name||"Facebook Page",page.access_token,expiresAt,grantedScopes);
      savedAccounts++;
     }
     const cursor=pageBatch.paging?.cursors?.after||null;
@@ -171,7 +178,7 @@ async function finishMetaOAuth(request,env,url) {
    stage="empty_asset_result";
    throw new Error("OAuth completed but no assigned "+platform+" assets were returned. Check the selected Business Login configuration and asset assignments.");
   }
-  await audit(env,userRow.id,"meta_oauth_completed","integration",platform,userRow.email,{platform,accounts:savedAccounts,token_type:token.token_type,expires_at:expiresAt});
+  await audit(env,userRow.id,"meta_oauth_completed","integration",platform,userRow.email,{platform,accounts:savedAccounts,granted_permissions:grantedScopes,token_type:token.token_type,expires_at:expiresAt});
   return metaResultPage("connected",platform==="instagram"?"Instagram accounts: "+savedAccounts:"Facebook Pages: "+savedAccounts);
  } catch(e) {
   const diagnostic=safeText(e?.message||"unknown Meta OAuth error",300);
