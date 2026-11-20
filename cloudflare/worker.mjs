@@ -8,7 +8,7 @@ const random = (n=32) => { const a=new Uint8Array(n); crypto.getRandomValues(a);
 const sha = async (v) => b64(await crypto.subtle.digest("SHA-256",new TextEncoder().encode(v)));
 const cors = (request) => {
  const origin=request.headers.get("Origin")||"";
- const headers={"Access-Control-Allow-Methods":"GET,POST,DELETE,OPTIONS","Access-Control-Allow-Headers":"Authorization,Content-Type,X-Bootstrap-Key","Vary":"Origin"};
+ const headers={"Access-Control-Allow-Methods":"GET,POST,DELETE,OPTIONS","Access-Control-Allow-Headers":"Authorization,Content-Type,X-Bootstrap-Key,Idempotency-Key","Vary":"Origin"};
  if(origin===ORIGIN) headers["Access-Control-Allow-Origin"]=origin;
  return headers;
 };
@@ -61,6 +61,14 @@ async function decrypt(value,env) {
  const bytes=unb64(value);
  const plain=await crypto.subtle.decrypt({name:"AES-GCM",iv:bytes.slice(0,12),additionalData:new TextEncoder().encode("alpha-centauri-social-v1")},key,bytes.slice(12));
  return new TextDecoder().decode(plain);
+}
+export function facebookPublishReadiness(scopes=[],tasks=[]) {
+ const granted=new Set(Array.isArray(scopes)?scopes:[]);
+ const assigned=new Set(Array.isArray(tasks)?tasks:[]);
+ const missing=[];
+ if(!granted.has("pages_manage_posts")) missing.push("pages_manage_posts");
+ if(!(assigned.has("CREATE_CONTENT")||assigned.has("MANAGE"))) missing.push("Page task CREATE_CONTENT");
+ return {ready:missing.length===0,missing};
 }
 export async function verifyMetaSignature(rawBody,signature,appSecret) {
  if(!rawBody||!signature||!appSecret||!/^sha256=[a-f0-9]{64}$/i.test(signature)) return false;
@@ -122,10 +130,10 @@ async function exchangeMetaCode(env,code) {
 }
  return {access_token:body.access_token,expires_in:Number(body.expires_in)||0,token_type:body.token_type||null};
 }
-async function saveMetaAccount(env,user,platform,externalId,name,accessToken,expiresAt,scopes,pictureUrl=null) {
+async function saveMetaAccount(env,user,platform,externalId,name,accessToken,expiresAt,scopes,pictureUrl=null,pageTasks=[]) {
  const id=random(16),encrypted=await encrypt(accessToken,env),stamp=now();
- await env.DB.prepare("INSERT INTO social_accounts(id,owner_user_id,platform,external_account_id,account_name,profile_picture_url,status,scopes_json,token_expires_at,encrypted_access_token,encrypted_refresh_token,created_at,updated_at) VALUES(?,?,?,?,?,?,'connected',?,?,?,NULL,?,?) ON CONFLICT(owner_user_id,platform,external_account_id) DO UPDATE SET account_name=excluded.account_name,profile_picture_url=excluded.profile_picture_url,status='connected',scopes_json=excluded.scopes_json,token_expires_at=excluded.token_expires_at,encrypted_access_token=excluded.encrypted_access_token,updated_at=excluded.updated_at")
- .bind(id,user.id,platform,externalId,safeText(name,160),pictureUrl,JSON.stringify(scopes),expiresAt,encrypted,stamp,stamp).run();
+ await env.DB.prepare("INSERT INTO social_accounts(id,owner_user_id,platform,external_account_id,account_name,profile_picture_url,status,scopes_json,page_tasks_json,token_expires_at,encrypted_access_token,encrypted_refresh_token,created_at,updated_at) VALUES(?,?,?,?,?,?,'connected',?,?,?,?,NULL,?,?) ON CONFLICT(owner_user_id,platform,external_account_id) DO UPDATE SET account_name=excluded.account_name,profile_picture_url=excluded.profile_picture_url,status='connected',scopes_json=excluded.scopes_json,page_tasks_json=excluded.page_tasks_json,token_expires_at=excluded.token_expires_at,encrypted_access_token=excluded.encrypted_access_token,updated_at=excluded.updated_at")
+ .bind(id,user.id,platform,externalId,safeText(name,160),pictureUrl,JSON.stringify(scopes),JSON.stringify(pageTasks),expiresAt,encrypted,stamp,stamp).run();
  await audit(env,user.id,"meta_account_connected","account",externalId,user.email,{platform,account_name:safeText(name,160)});
 }
 async function finishMetaOAuth(request,env,url) {
@@ -221,7 +229,7 @@ async function handle(request,env) {
  if(method==="GET"&&(path==="/"||path==="/health")) {
   const setup=!!env.BOOTSTRAP_KEY&&!!env.TOKEN_ENCRYPTION_KEY;
   const users=await env.DB.prepare("SELECT COUNT(*) n FROM app_users").first();
-  return json({service:"Alpha Centauri Social Commerce Cloud API",status:"online",mode:"cloud",setup_ready:setup,admin_initialized:(users?.n||0)>0,publishing_enabled:false,meta_oauth_configured:metaAnyConfigured(env),meta_instagram_configured:metaConfigured(env,"instagram"),meta_facebook_configured:metaConfigured(env,"facebook"),meta_webhook_configured:webhookConfigured(env),meta_redirect_uri:env.META_REDIRECT_URI||null,platforms:Object.fromEntries(PLATFORMS.map(p=>[p,p==="instagram"?(metaConfigured(env,"instagram")?"oauth_ready":"oauth_not_configured"):p==="facebook"?(metaConfigured(env,"facebook")?"oauth_ready":"oauth_not_configured"):"oauth_not_configured"]))},200,cors(request));
+  return json({service:"Alpha Centauri Social Commerce Cloud API",status:"online",mode:"cloud",setup_ready:setup,admin_initialized:(users?.n||0)>0,publishing_enabled:true,publishing_adapter:"facebook_page_photo",meta_oauth_configured:metaAnyConfigured(env),meta_instagram_configured:metaConfigured(env,"instagram"),meta_facebook_configured:metaConfigured(env,"facebook"),meta_webhook_configured:webhookConfigured(env),meta_redirect_uri:env.META_REDIRECT_URI||null,platforms:Object.fromEntries(PLATFORMS.map(p=>[p,p==="instagram"?(metaConfigured(env,"instagram")?"oauth_ready":"oauth_not_configured"):p==="facebook"?(metaConfigured(env,"facebook")?"oauth_ready":"oauth_not_configured"):"oauth_not_configured"]))},200,cors(request));
  }
  if(method==="POST"&&path==="/auth/bootstrap") {
   if(!env.BOOTSTRAP_KEY||(request.headers.get("Authorization")||"").replace(/^Bootstrap\s+/i,"")!==env.BOOTSTRAP_KEY) return json({error:"Invalid bootstrap key"},403,cors(request));
@@ -259,8 +267,8 @@ async function handle(request,env) {
   return json({authorization_url:buildMetaAuthorizationUrl(env,state,platform),expires_at:expiry,redirect_uri:env.META_REDIRECT_URI,platform,login_mode:"unified_login_config_id"},200,cors(request));
  }
  if(method==="GET"&&path==="/accounts") {
-  const {results=[]}=await env.DB.prepare("SELECT id,platform,external_account_id,account_name,profile_picture_url,status,scopes_json,token_expires_at,created_at,updated_at FROM social_accounts WHERE owner_user_id=? ORDER BY platform,account_name").bind(user.id).all();
-  return json({accounts:results.map(a=>({...a,scopes:JSON.parse(a.scopes_json)}))},200,cors(request));
+  const {results=[]}=await env.DB.prepare("SELECT id,platform,external_account_id,account_name,profile_picture_url,status,scopes_json,page_tasks_json,token_expires_at,created_at,updated_at FROM social_accounts WHERE owner_user_id=? ORDER BY platform,account_name").bind(user.id).all();
+  return json({accounts:results.map(a=>{const scopes=JSON.parse(a.scopes_json||"[]"),page_tasks=JSON.parse(a.page_tasks_json||"[]");const readiness=a.platform==="facebook"?facebookPublishReadiness(scopes,page_tasks):{ready:false,missing:["adapter not enabled"]};return {...a,scopes,page_tasks,publish_ready:readiness.ready,publish_blockers:readiness.missing};})},200,cors(request));
  }
  if(method==="POST"&&path==="/accounts") {
   const b=await request.json();
@@ -294,6 +302,73 @@ async function handle(request,env) {
    .bind(id,user.id,b.title,b.body,b.affiliate_url||null,b.disclosure||"",JSON.stringify(b.platforms),JSON.stringify(b.account_ids),"draft",stamp,stamp).run();
   await audit(env,user.id,"content_draft_created","content",id,user.email,{platforms:b.platforms});
   return json({id,status:"draft"},201,cors(request));
+ }
+
+ const publishMatch=path.match(/^\/content\/([a-zA-Z0-9_-]+)\/publish\/([a-zA-Z0-9_-]+)$/);
+ if(method==="POST"&&publishMatch) {
+  const contentId=publishMatch[1],accountId=publishMatch[2];
+  const item=await env.DB.prepare("SELECT id,title,body,status,platforms_json,account_ids_json FROM content_items WHERE id=? AND owner_user_id=?").bind(contentId,user.id).first();
+  if(!item) return json({error:"Content not found"},404,cors(request));
+  if(item.status!=="approved") return json({error:"Content must be approved before publishing"},409,cors(request));
+  const targetIds=JSON.parse(item.account_ids_json||"[]"),platforms=JSON.parse(item.platforms_json||"[]");
+  if(!targetIds.includes(accountId)||!platforms.includes("facebook")) return json({error:"Facebook account is not an approved destination for this content"},422,cors(request));
+  const account=await env.DB.prepare("SELECT id,external_account_id,account_name,status,scopes_json,page_tasks_json,encrypted_access_token FROM social_accounts WHERE id=? AND owner_user_id=? AND platform='facebook'").bind(accountId,user.id).first();
+  if(!account||account.status!=="connected"||!account.encrypted_access_token) return json({error:"Facebook Page is not connected"},409,cors(request));
+  const readiness=facebookPublishReadiness(JSON.parse(account.scopes_json||"[]"),JSON.parse(account.page_tasks_json||"[]"));
+  if(!readiness.ready) return json({error:"Facebook Page is not authorized to publish. Reconnect it and grant the required access.",missing_permissions:readiness.missing},403,cors(request));
+  const form=await request.formData(),image=form.get("image");
+  if(!image||typeof image.arrayBuffer!=="function") return json({error:"Choose a JPEG or PNG image before publishing"},422,cors(request));
+  if(!["image/jpeg","image/png"].includes(image.type)) return json({error:"Only JPEG and PNG images are supported"},415,cors(request));
+  if(image.size<1||image.size>8*1024*1024) return json({error:"Image must be smaller than 8 MB"},413,cors(request));
+  const idempotencyKey=safeText(request.headers.get("Idempotency-Key")||"",128);
+  if(!/^[A-Za-z0-9_-]{16,128}$/.test(idempotencyKey)) return json({error:"A valid Idempotency-Key is required"},422,cors(request));
+  const existing=await env.DB.prepare("SELECT status,external_post_id,permalink,error_message FROM publish_records WHERE content_id=? AND account_id=?").bind(contentId,accountId).first();
+  if(existing) {
+   if(existing.status==="published") return json({status:"published",post_id:existing.external_post_id,permalink:existing.permalink,idempotent:true},200,cors(request));
+   return json({error:"A publish attempt already exists for this content and Page; check its status before retrying",publish_status:existing.status,detail:existing.error_message||null},409,cors(request));
+  }
+  const recordId=random(16),stamp=now();
+  await env.DB.prepare("INSERT INTO publish_records(id,owner_user_id,content_id,account_id,platform,idempotency_key,status,created_at,updated_at) VALUES(?,?,?,?,?,?,'publishing',?,?)")
+   .bind(recordId,user.id,contentId,accountId,"facebook",idempotencyKey,stamp,stamp).run();
+  const pageToken=await decrypt(account.encrypted_access_token,env);
+  const body=new FormData();
+  body.set("access_token",pageToken);
+  if(env.META_APP_SECRET) {
+   const key=await crypto.subtle.importKey("raw",new TextEncoder().encode(env.META_APP_SECRET),{name:"HMAC",hash:"SHA-256"},false,["sign"]);
+   const proof=await crypto.subtle.sign("HMAC",key,new TextEncoder().encode(pageToken));
+   body.set("appsecret_proof",Array.from(new Uint8Array(proof),b=>b.toString(16).padStart(2,"0")).join(""));
+  }
+  body.set("message",item.body);
+  body.set("published","true");
+  body.set("source",image,image.name||"upload.jpg");
+  let response,meta;
+  try {
+   response=await fetch("https://graph.facebook.com/"+graphVersion(env)+"/"+encodeURIComponent(account.external_account_id)+"/photos",{method:"POST",body,headers:{Accept:"application/json"}});
+   meta=await response.json().catch(()=>({}));
+  } catch(error) {
+   await env.DB.prepare("UPDATE publish_records SET status='unknown',error_message=?,updated_at=? WHERE id=?")
+    .bind("Network error after publish request; reconcile the Page before retrying.",now(),recordId).run();
+   await audit(env,user.id,"facebook_publish_unknown","content",contentId,user.email,{account_id:accountId,reason:"network_error"});
+   return json({error:"The connection ended before Facebook confirmed the result. The post may have been created; check the Page before retrying.",publish_status:"unknown"},502,cors(request));
+  }
+  if(!response.ok||meta.error||!meta.id) {
+   const message=safeText(meta.error?.message||"Facebook did not return a photo ID",300);
+   await env.DB.prepare("UPDATE publish_records SET status='failed',error_message=?,updated_at=? WHERE id=?").bind(message,now(),recordId).run();
+   await audit(env,user.id,"facebook_publish_failed","content",contentId,user.email,{account_id:accountId,error:message});
+   return json({error:"Facebook rejected the publish request: "+message,publish_status:"failed"},502,cors(request));
+  }
+  const postId=meta.post_id||meta.id;
+  let permalink=null;
+  try {
+   const details=await graphGet(env,postId,{fields:"permalink_url",access_token:pageToken});
+   permalink=details.permalink_url||null;
+  } catch {}
+  await env.DB.prepare("UPDATE publish_records SET status='published',external_post_id=?,permalink=?,updated_at=? WHERE id=?")
+   .bind(String(postId),permalink,now(),recordId).run();
+  const counts=await env.DB.prepare("SELECT COUNT(*) total,SUM(CASE WHEN status='published' THEN 1 ELSE 0 END) published FROM publish_records WHERE content_id=?").bind(contentId).first();
+  if((counts?.published||0)>=targetIds.length) await env.DB.prepare("UPDATE content_items SET status='published',updated_at=? WHERE id=? AND owner_user_id=?").bind(now(),contentId,user.id).run();
+  await audit(env,user.id,"facebook_post_published","content",contentId,user.email,{account_id:accountId,post_id:String(postId),permalink});
+  return json({status:"published",platform:"facebook",account_name:account.account_name,post_id:String(postId),permalink},201,cors(request));
  }
  const submit=path.match(/^\/content\/([a-zA-Z0-9_-]+)\/submit$/);
  if(method==="POST"&&submit) {
