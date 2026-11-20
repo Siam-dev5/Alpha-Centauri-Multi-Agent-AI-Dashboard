@@ -125,3 +125,11 @@ def test_dashboard_simulation_never_claims_youtube_publication():
     assert "ไม่มี YouTube Post ID" in youtube_simulation
     assert "อัปโหลดคลิปลงช่อง YouTube เรียบร้อยแล้วครับ" not in youtube_simulation
     assert "รายงานยอดอัปโหลดคลิป YouTube รอบเช้าสำเร็จ" not in dashboard
+
+
+def test_meta_oauth_persists_only_granted_permissions():
+    worker_source = (Path(__file__).resolve().parents[1] / "cloudflare" / "worker.mjs").read_text(encoding="utf-8")
+    assert 'async function grantedMetaPermissions(env,accessToken)' in worker_source
+    assert 'item.status==="granted"' in worker_source
+    assert 'expiresAt,grantedScopes' in worker_source
+    assert 'stage="permission_discovery"' in worker_source
