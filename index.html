@@ -2422,7 +2422,7 @@
         function extractFacebookCaption(command) {
             const quoted = String(command || '').match(/["“']([^"”']{1,2000})["”']/);
             if (quoted) return quoted[1].trim();
-            const marked = String(command || '').match(/(?:ข้อความ|caption|ว่า)\s*[:：]?\s*["“']?([\s\\S]*?)["”']?\s*(?=(?:พร้อมแนบรูป|แนบรูป|ไปที่เพจ|ลงเพจ|$))/i);
+            const marked = String(command || '').match(/(?:ข้อความ|caption|ว่า)\s*[:：]?\s*["“']?([\s\S]*?)["”']?\s*(?=(?:พร้อมแนบรูป|แนบรูป|ไปที่เพจ|ลงเพจ|$))/i);
             return marked ? marked[1].trim().replace(/["“”']+$/g, '') : '';
         }
 
