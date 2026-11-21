@@ -16,3 +16,19 @@ test("all inline JavaScript in index.html parses", () => {
     );
   }
 });
+
+test("OpenBot chat routes explicit Facebook publish commands through authenticated approval flow", () => {
+  const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
+  const submit = html.slice(html.indexOf("function handleUserSubmit"), html.indexOf("LIVE API EXECUTION ENGINE"));
+  assert.match(html, /function isFacebookPublishIntent\\(text\\)/);
+  assert.match(html, /function extractFacebookCaption\\(command\\)/);
+  assert.match(submit, /if \\(isFacebookPublishIntent\\(text\\)\\)/);
+  assert.ok(submit.indexOf("isFacebookPublishIntent(text)") < submit.indexOf("systemConfig.execMode === 'LIVE'"));
+  assert.match(html, /scRequest\\('\\/content', \\{method:'POST'/);
+  assert.match(html, /scRequest\\('\\/content\\/' \\+ encodeURIComponent\\(draft\\.id\\) \\+ '\\/submit'/);
+  assert.match(html, /approveAndPublishFacebookFromChat/);
+  assert.match(html, /decision:'approve'/);
+  assert.match(html, /confirm\\('ยืนยันอนุมัติและเผยแพร่/);
+  assert.match(html, /publish\\/' \\+ encodeURIComponent\\(account\\.id\\)/);
+  assert.match(html, /อย่ากดซ้ำจนกว่าจะตรวจประวัติการเผยแพร่/);
+});
