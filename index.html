@@ -1033,7 +1033,7 @@
                     method:'POST', body:form,
                     headers:{'Idempotency-Key':crypto.randomUUID().replace(/-/g,'')}
                 });
-                alert('เผยแพร่สำเร็จ\\nPost ID: ' + result.post_id + (result.permalink ? '\\n' + result.permalink : ''));
+                alert('เผยแพร่สำเร็จ\nPost ID: ' + result.post_id + (result.permalink ? '\n' + result.permalink : ''));
                 await renderSocialContent();
             } catch (error) {
                 alert('ยังเผยแพร่ไม่สำเร็จ: ' + error.message);
@@ -2412,6 +2412,140 @@
             appendChatBubble('bot', 'ล้างประวัติการสนทนาแล้วครับ พร้อมรับคำสั่งข้อความหรือรูปภาพใหม่ทันที');
         }
 
+        // Explicit chat-to-Facebook command path. Draft first; require a visible human approval click before publishing.
+        function isFacebookPublishIntent(text) {
+            const value = String(text || '');
+            if (/ไม่ต้อง|อย่า|ห้าม|ยกเลิก/.test(value)) return false;
+            return /facebook|เฟซบุ๊ก|เพจ/i.test(value) && /โพส|โพสต์|publish|post/i.test(value);
+        }
+
+        function extractFacebookCaption(command) {
+            const quoted = String(command || '').match(/["“']([^"”']{1,2000})["”']/);
+            if (quoted) return quoted[1].trim();
+            const marked = String(command || '').match(/(?:ข้อความ|caption|ว่า)\s*[:：]?\s*["“']?([\s\S]*?)["”']?\s*(?=(?:พร้อมแนบรูป|แนบรูป|ไปที่เพจ|ลงเพจ|$))/i);
+            return marked ? marked[1].trim().replace(/["“”']+$/g, '') : '';
+        }
+
+        function appendFacebookChatApprovalCard(contentId, account, caption, imageDataUrl, imageName) {
+            const feed = document.getElementById('chat-feed');
+            const card = document.createElement('section');
+            card.className = 'ml-9 max-w-[88%] rounded-xl border border-amber-400/40 bg-amber-500/10 p-3 space-y-2';
+            const heading = document.createElement('p');
+            heading.className = 'text-xs font-semibold text-amber-200';
+            heading.textContent = 'Social Bot · รอการอนุมัติก่อนเผยแพร่';
+            const target = document.createElement('p');
+            target.className = 'text-[11px] text-slate-200';
+            target.textContent = 'Facebook Page: ' + account.account_name;
+            const body = document.createElement('p');
+            body.className = 'text-xs text-white whitespace-pre-wrap break-words';
+            body.textContent = caption;
+            const image = document.createElement('img');
+            image.src = imageDataUrl;
+            image.alt = imageName || 'Facebook post image';
+            image.className = 'max-h-36 rounded-lg border border-slate-600 object-contain';
+            const note = document.createElement('p');
+            note.className = 'text-[10px] text-amber-200';
+            note.textContent = 'ตรวจข้อความ เพจ และรูปภาพให้ถูกต้อง การกดอนุมัติจะเผยแพร่สู่ Facebook จริง';
+            const status = document.createElement('p');
+            status.className = 'text-[11px] text-slate-300';
+            status.textContent = 'สถานะ: Pending approval';
+            const approve = document.createElement('button');
+            approve.type = 'button';
+            approve.className = 'rounded-lg bg-emerald-500/20 border border-emerald-400/40 px-3 py-2 text-xs text-emerald-100';
+            approve.textContent = 'อนุมัติและเผยแพร่จริง';
+            approve.addEventListener('click', () => approveAndPublishFacebookFromChat(contentId, account, caption, imageDataUrl, imageName, status, approve));
+            const reject = document.createElement('button');
+            reject.type = 'button';
+            reject.className = 'ml-2 rounded-lg border border-rose-400/30 px-3 py-2 text-xs text-rose-200';
+            reject.textContent = 'ยกเลิก';
+            reject.addEventListener('click', async () => {
+                reject.disabled = true;
+                try {
+                    const user = JSON.parse(sessionStorage.getItem('sc_user') || '{}');
+                    await scRequest('/content/' + encodeURIComponent(contentId) + '/decision', {method:'POST', body:JSON.stringify({decision:'reject',actor:user.email || 'dashboard_owner',reason:'Rejected from OpenBot chat'})});
+                    status.textContent = 'สถานะ: ปฏิเสธแล้ว · ไม่มีการเผยแพร่';
+                    approve.disabled = true;
+                } catch (error) {
+                    status.textContent = 'ยกเลิกไม่สำเร็จ: ' + error.message;
+                    reject.disabled = false;
+                }
+            });
+            card.append(heading, target, body, image, note, status, approve, reject);
+            feed.appendChild(card);
+            feed.scrollTop = feed.scrollHeight;
+        }
+
+        async function approveAndPublishFacebookFromChat(contentId, account, caption, imageDataUrl, imageName, status, button) {
+            if (!confirm('ยืนยันอนุมัติและเผยแพร่ข้อความนี้ไปยัง Facebook Page "' + account.account_name + '" จริงหรือไม่?')) return;
+            button.disabled = true;
+            status.textContent = 'สถานะ: กำลังบันทึก Human Approval…';
+            try {
+                const user = JSON.parse(sessionStorage.getItem('sc_user') || '{}');
+                await scRequest('/content/' + encodeURIComponent(contentId) + '/decision', {method:'POST', body:JSON.stringify({decision:'approve',actor:user.email || 'dashboard_owner'})});
+                status.textContent = 'สถานะ: อนุมัติแล้ว · กำลังส่งรูปไป Facebook…';
+                const blob = await (await fetch(imageDataUrl)).blob();
+                const form = new FormData();
+                form.append('image', blob, imageName || 'openbot-upload.' + (blob.type === 'image/png' ? 'png' : 'jpg'));
+                const idempotency = (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2)).replace(/-/g, '');
+                const result = await scRequest('/content/' + encodeURIComponent(contentId) + '/publish/' + encodeURIComponent(account.id), {
+                    method:'POST', body:form, headers:{'Idempotency-Key':idempotency}
+                });
+                status.textContent = 'สถานะ: เผยแพร่สำเร็จ · Post ID: ' + (result.post_id || 'ได้รับการยืนยันจาก Facebook');
+                if (result.permalink) {
+                    const link = document.createElement('a');
+                    link.href = result.permalink;
+                    link.target = '_blank';
+                    link.rel = 'noopener noreferrer';
+                    link.className = 'block text-[11px] text-cyan-300 underline';
+                    link.textContent = 'เปิดโพสต์ Facebook';
+                    status.parentElement.appendChild(link);
+                }
+                appendChatBubble('bot', 'Facebook ยืนยันการเผยแพร่สำเร็จแล้ว\nPost ID: ' + (result.post_id || '-') + (result.permalink ? '\n' + result.permalink : ''));
+            } catch (error) {
+                status.textContent = 'สถานะ: ไม่สำเร็จ/ต้องตรวจสอบ · ' + error.message + ' · อย่ากดซ้ำจนกว่าจะตรวจประวัติการเผยแพร่';
+                appendChatBubble('bot', 'ยังยืนยันการเผยแพร่ไม่ได้: ' + error.message + '\nระบบจะไม่ส่งซ้ำอัตโนมัติเพื่อป้องกันโพสต์ซ้ำ');
+            }
+        }
+
+        async function handleFacebookPublishChatCommand(command, imageDataUrl, imageName) {
+            if (!sessionStorage.getItem('sc_session')) {
+                appendChatBubble('bot', 'คำสั่งโพสต์ Facebook ต้องเข้าสู่ระบบ Social & Commerce ก่อน กรุณาเปิด Social & Affiliate และเข้าสู่ระบบผู้ดูแลในแท็บนี้ แล้วส่งคำสั่งอีกครั้ง');
+                return;
+            }
+            if (!imageDataUrl) {
+                appendChatBubble('bot', 'รับคำสั่งโพสต์ Facebook แล้ว แต่ยังไม่มีรูปแนบ กรุณาแนบภาพ JPEG หรือ PNG แล้วส่งคำสั่งอีกครั้ง');
+                return;
+            }
+            const caption = extractFacebookCaption(command);
+            if (!caption) {
+                appendChatBubble('bot', 'รับคำสั่งแล้ว กรุณาระบุข้อความโพสต์ให้ชัดเจน เช่น "โพสต์ Facebook ข้อความ Hello Everyone พร้อมแนบรูป"');
+                return;
+            }
+            if (!/^data:image\/(png|jpeg|jpg);base64,/i.test(imageDataUrl)) {
+                appendChatBubble('bot', 'รูปแนบต้องเป็น JPEG หรือ PNG เท่านั้น กรุณาแปลงรูปแล้วส่งใหม่');
+                return;
+            }
+            try {
+                const data = await scRequest('/accounts');
+                const ready = (data.accounts || []).filter(a => a.platform === 'facebook' && a.status === 'connected' && a.publish_ready);
+                if (ready.length !== 1) {
+                    const detail = ready.length ? 'พบ Facebook Page ที่พร้อมโพสต์มากกว่า 1 เพจ กรุณาเลือกปลายทางใน Social & Commerce ก่อน' : 'ยังไม่พบ Facebook Page ที่ผ่าน Publish Readiness';
+                    appendChatBubble('bot', detail + ' จึงยังไม่สร้างคำสั่งเผยแพร่');
+                    return;
+                }
+                const account = ready[0];
+                const draft = await scRequest('/content', {method:'POST', body:JSON.stringify({
+                    title:'OpenBot Facebook: ' + caption.slice(0, 180),
+                    body:caption, platforms:['facebook'], account_ids:[account.id]
+                })});
+                await scRequest('/content/' + encodeURIComponent(draft.id) + '/submit', {method:'POST'});
+                appendChatBubble('bot', 'รับคำสั่งจากแชทแล้ว · สร้าง Draft และส่งเข้า Human Approval เรียบร้อย ยังไม่มีการโพสต์สาธารณะ');
+                appendFacebookChatApprovalCard(draft.id, account, caption, imageDataUrl, imageName || 'ภาพแนบจาก OpenBot');
+            } catch (error) {
+                appendChatBubble('bot', 'ไม่สามารถเตรียมโพสต์ Facebook ได้: ' + error.message);
+            }
+        }
+
         function handleUserSubmit(e) {
             e.preventDefault();
             const input = document.getElementById('command-input');
@@ -2425,6 +2559,13 @@
             appendChatBubble('user', displayMsg, currentImg);
             input.value = '';
             removeAttachedImage();
+
+            // Route explicit Facebook publish commands to the authenticated Social API in either UI mode.
+            // The chat creates a draft only; a separate approval card is required before public publishing.
+            if (isFacebookPublishIntent(text)) {
+                handleFacebookPublishChatCommand(text, currentImg, imgName);
+                return;
+            }
 
             // Check if Live API Mode is active
             if (systemConfig.execMode === 'LIVE') {
