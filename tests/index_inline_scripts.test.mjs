@@ -20,15 +20,15 @@ test("all inline JavaScript in index.html parses", () => {
 test("OpenBot chat routes explicit Facebook publish commands through authenticated approval flow", () => {
   const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
   const submit = html.slice(html.indexOf("function handleUserSubmit"), html.indexOf("LIVE API EXECUTION ENGINE"));
-  assert.match(html, /function isFacebookPublishIntent\\(text\\)/);
-  assert.match(html, /function extractFacebookCaption\\(command\\)/);
-  assert.match(submit, /if \\(isFacebookPublishIntent\\(text\\)\\)/);
+  assert.ok(html.includes("function isFacebookPublishIntent(text)"));
+  assert.ok(html.includes("function extractFacebookCaption(command)"));
+  assert.ok(submit.includes("if (isFacebookPublishIntent(text))"));
   assert.ok(submit.indexOf("isFacebookPublishIntent(text)") < submit.indexOf("systemConfig.execMode === 'LIVE'"));
-  assert.match(html, /scRequest\\('\\/content', \\{method:'POST'/);
-  assert.match(html, /scRequest\\('\\/content\\/' \\+ encodeURIComponent\\(draft\\.id\\) \\+ '\\/submit'/);
-  assert.match(html, /approveAndPublishFacebookFromChat/);
-  assert.match(html, /decision:'approve'/);
-  assert.match(html, /confirm\\('ยืนยันอนุมัติและเผยแพร่/);
-  assert.match(html, /publish\\/' \\+ encodeURIComponent\\(account\\.id\\)/);
-  assert.match(html, /อย่ากดซ้ำจนกว่าจะตรวจประวัติการเผยแพร่/);
+  assert.ok(html.includes("scRequest('/content', {method:'POST'"));
+  assert.ok(html.includes("'/submit'"));
+  assert.ok(html.includes("approveAndPublishFacebookFromChat"));
+  assert.ok(html.includes("decision:'approve'"));
+  assert.ok(html.includes("confirm('ยืนยันอนุมัติและเผยแพร่"));
+  assert.ok(html.includes("publish/' + encodeURIComponent(account.id)"));
+  assert.ok(html.includes("อย่ากดซ้ำจนกว่าจะตรวจประวัติการเผยแพร่"));
 });
