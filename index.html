@@ -1033,7 +1033,7 @@
                     method:'POST', body:form,
                     headers:{'Idempotency-Key':crypto.randomUUID().replace(/-/g,'')}
                 });
-                alert('เผยแพร่สำเร็จ\\nPost ID: ' + result.post_id + (result.permalink ? '\\n' + result.permalink : ''));
+                alert('เผยแพร่สำเร็จ\nPost ID: ' + result.post_id + (result.permalink ? '\n' + result.permalink : ''));
                 await renderSocialContent();
             } catch (error) {
                 alert('ยังเผยแพร่ไม่สำเร็จ: ' + error.message);
@@ -2422,7 +2422,7 @@
         function extractFacebookCaption(command) {
             const quoted = String(command || '').match(/["“']([^"”']{1,2000})["”']/);
             if (quoted) return quoted[1].trim();
-            const marked = String(command || '').match(/(?:ข้อความ|caption|ว่า)\\s*[:：]?\\s*["“']?([\\s\\S]*?)["”']?\\s*(?=(?:พร้อมแนบรูป|แนบรูป|ไปที่เพจ|ลงเพจ|$))/i);
+            const marked = String(command || '').match(/(?:ข้อความ|caption|ว่า)\s*[:：]?\s*["“']?([\s\\S]*?)["”']?\s*(?=(?:พร้อมแนบรูป|แนบรูป|ไปที่เพจ|ลงเพจ|$))/i);
             return marked ? marked[1].trim().replace(/["“”']+$/g, '') : '';
         }
 
@@ -2500,10 +2500,10 @@
                     link.textContent = 'เปิดโพสต์ Facebook';
                     status.parentElement.appendChild(link);
                 }
-                appendChatBubble('bot', 'Facebook ยืนยันการเผยแพร่สำเร็จแล้ว\\nPost ID: ' + (result.post_id || '-') + (result.permalink ? '\\n' + result.permalink : ''));
+                appendChatBubble('bot', 'Facebook ยืนยันการเผยแพร่สำเร็จแล้ว\nPost ID: ' + (result.post_id || '-') + (result.permalink ? '\n' + result.permalink : ''));
             } catch (error) {
                 status.textContent = 'สถานะ: ไม่สำเร็จ/ต้องตรวจสอบ · ' + error.message + ' · อย่ากดซ้ำจนกว่าจะตรวจประวัติการเผยแพร่';
-                appendChatBubble('bot', 'ยังยืนยันการเผยแพร่ไม่ได้: ' + error.message + '\\nระบบจะไม่ส่งซ้ำอัตโนมัติเพื่อป้องกันโพสต์ซ้ำ');
+                appendChatBubble('bot', 'ยังยืนยันการเผยแพร่ไม่ได้: ' + error.message + '\nระบบจะไม่ส่งซ้ำอัตโนมัติเพื่อป้องกันโพสต์ซ้ำ');
             }
         }
 
@@ -2521,7 +2521,7 @@
                 appendChatBubble('bot', 'รับคำสั่งแล้ว กรุณาระบุข้อความโพสต์ให้ชัดเจน เช่น "โพสต์ Facebook ข้อความ Hello Everyone พร้อมแนบรูป"');
                 return;
             }
-            if (!/^data:image\\/(png|jpeg|jpg);base64,/i.test(imageDataUrl)) {
+            if (!/^data:image\/(png|jpeg|jpg);base64,/i.test(imageDataUrl)) {
                 appendChatBubble('bot', 'รูปแนบต้องเป็น JPEG หรือ PNG เท่านั้น กรุณาแปลงรูปแล้วส่งใหม่');
                 return;
             }
