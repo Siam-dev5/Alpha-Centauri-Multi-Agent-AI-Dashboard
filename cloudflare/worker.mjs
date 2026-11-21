@@ -173,7 +173,7 @@ async function finishMetaOAuth(request,env,url) {
     for(const page of (pageBatch.data||[])) {
      if(!page.id||!page.access_token) continue;
      stage="persist_facebook_page";
-     await saveMetaAccount(env,userRow,"facebook",page.id,page.name||"Facebook Page",page.access_token,expiresAt,grantedScopes);
+     await saveMetaAccount(env,userRow,"facebook",page.id,page.name||"Facebook Page",page.access_token,expiresAt,grantedScopes,null,Array.isArray(page.tasks)?page.tasks:[]);
      savedAccounts++;
     }
     const cursor=pageBatch.paging?.cursors?.after||null;
