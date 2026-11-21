@@ -2507,7 +2507,7 @@
             }
         }
 
-        async function handleFacebookPublishChatCommand(command, imageDataUrl) {
+        async function handleFacebookPublishChatCommand(command, imageDataUrl, imageName) {
             if (!sessionStorage.getItem('sc_session')) {
                 appendChatBubble('bot', 'คำสั่งโพสต์ Facebook ต้องเข้าสู่ระบบ Social & Commerce ก่อน กรุณาเปิด Social & Affiliate และเข้าสู่ระบบผู้ดูแลในแท็บนี้ แล้วส่งคำสั่งอีกครั้ง');
                 return;
@@ -2540,7 +2540,7 @@
                 })});
                 await scRequest('/content/' + encodeURIComponent(draft.id) + '/submit', {method:'POST'});
                 appendChatBubble('bot', 'รับคำสั่งจากแชทแล้ว · สร้าง Draft และส่งเข้า Human Approval เรียบร้อย ยังไม่มีการโพสต์สาธารณะ');
-                appendFacebookChatApprovalCard(draft.id, account, caption, imageDataUrl, 'ภาพแนบจาก OpenBot');
+                appendFacebookChatApprovalCard(draft.id, account, caption, imageDataUrl, imageName || 'ภาพแนบจาก OpenBot');
             } catch (error) {
                 appendChatBubble('bot', 'ไม่สามารถเตรียมโพสต์ Facebook ได้: ' + error.message);
             }
@@ -2563,7 +2563,7 @@
             // Route explicit Facebook publish commands to the authenticated Social API in either UI mode.
             // The chat creates a draft only; a separate approval card is required before public publishing.
             if (isFacebookPublishIntent(text)) {
-                handleFacebookPublishChatCommand(text, currentImg);
+                handleFacebookPublishChatCommand(text, currentImg, imgName);
                 return;
             }
 
