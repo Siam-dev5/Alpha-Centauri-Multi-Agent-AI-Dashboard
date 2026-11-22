@@ -69,3 +69,10 @@ Facebook Page image publishing is available only for OAuth-connected Pages that 
 - Target Page: the single connected publish-ready Facebook Page, or the Page named in the command. With several ready Pages and no name, the run is `blocked` before any AI call and the user is asked to name the Page.
 - The user's command authorises direct publishing for that run: the content item is created as `approved` (`approved_by` records the workflow) and audited as `content_approve`. One `publish_records` row per content/Page prevents duplicate posts; failed or unknown results are never retried.
 - Generated images are stored in `workflow_assets` (base64 JPEG) and served to the owner at `GET /workflows/{id}/assets/{cover|illustration|banner}`. Migration: `migrations/0008_creative_workflow.sql`; `wrangler.toml` adds the `AI` binding.
+
+## Activity log for Cloud workflow runs
+- Source of truth: `workflow_runs` and `workflow_events` in D1 (each event has a per-run `seq`). The browser keeps no separate copy.
+- On load and after Social login the Dashboard reads `GET /workflows` and `GET /workflows/:id`, rebuilds the activity log with server timestamps (entries labelled `[บันทึก …]`) and lists every run in the **กลุ่มงาน** selector. Clicking a `WF-…` badge also filters to that run.
+- A run that is still `running` after a refresh is followed again: events are polled every 1.5 s (`[LIVE …]`) and `/advance` is called; the Worker runs one stage per call under a row lock and reuses an existing publish record, so resuming never posts twice.
+- Every 15 s (tab visible) the list is synced, so runs started in another tab/device or advanced by the cron appear without reloading.
+- Each log entry is keyed by `run id + seq`; the same event fetched by live polling, a restore or a sync is shown once.

@@ -534,6 +534,14 @@
                     <button onclick="setLogFilter('MEDIA')" id="filter-MEDIA" class="filter-btn px-2.5 py-1 rounded-lg text-[11px] bg-space-950 text-slate-400 border border-slate-800 hover:text-white">ทีม Media</button>
                     <button onclick="setLogFilter('ADMIN')" id="filter-ADMIN" class="filter-btn px-2.5 py-1 rounded-lg text-[11px] bg-space-950 text-slate-400 border border-slate-800 hover:text-white">บริหาร/เลขา</button>
                 </div>
+                <!-- Run / work-group selector: Cloud workflow runs restored from the backend -->
+                <div class="panel-header-content mt-1.5 flex items-center gap-1.5">
+                    <label for="log-run-filter" class="text-[10px] text-slate-400 shrink-0">กลุ่มงาน</label>
+                    <select id="log-run-filter" onchange="setRunFilter(this.value)" aria-label="เลือกกลุ่มงาน / Run" class="min-w-0 flex-1 rounded-lg bg-space-950 border border-slate-800 text-[11px] text-slate-200 px-2 py-1">
+                        <option value="ALL">ทุกกลุ่มงาน / ทุก Run</option>
+                    </select>
+                    <span id="log-sync-state" class="text-[9px] font-mono text-slate-500 shrink-0" title="สถานะการซิงก์ Run จาก Cloud">-</span>
+                </div>
             </div>
 
             <!-- Active Task Queue Mini Panel -->
@@ -933,12 +941,14 @@
                     const response = await fetch(SC_API + (initialized ? '/auth/login' : '/auth/bootstrap'), {method:'POST',headers:{'Content-Type':'application/json',...(initialized ? {} : {'Authorization':'Bootstrap ' + values.get('bootstrap')})},body:JSON.stringify({email:values.get('email'),password:values.get('password')})});
                     const data = await response.json(); if(!response.ok) throw new Error([data.error || 'Authentication failed',data.diagnostic_stage ? 'Stage: '+data.diagnostic_stage : '',data.diagnostic_message ? 'Detail: '+data.diagnostic_message : ''].filter(Boolean).join(' | '));
                     sessionStorage.setItem('sc_session',data.token); sessionStorage.setItem('sc_user',JSON.stringify(data.user)); switchSocialTab('accounts');
+                    wfStartSync();
                 } catch(error) { document.getElementById('sc-auth-error').textContent = error.message; }
             });
         }
         async function logoutSocialCommerce() {
             try { await scRequest('/auth/logout',{method:'POST'}); } catch(e) {}
             sessionStorage.removeItem('sc_session'); sessionStorage.removeItem('sc_user'); renderSocialAuth();
+            wfStopSync();
         }
         function switchSocialTab(tab) {
             scActiveTab = tab;
@@ -2273,20 +2283,51 @@
         // ==========================================
         // 4. LOGS & TASK QUEUE MANAGEMENT
         // ==========================================
-        function addActivityLog(fromName, toName, message, dept, taskId, atIso) {
+        // opts.runId groups an entry under a Cloud workflow run; opts.key makes it idempotent (one entry per run/seq,
+        // however often the same server event is fetched by live polling, a refresh restore or the background sync);
+        // opts.replay marks history restored from the backend (no simulated token counter).
+        const LOG_LIMIT = 600;
+        const logKeys = new Set();
+        function addActivityLog(fromName, toName, message, dept, taskId, atIso, opts = {}) {
+            if (opts.key) { if (logKeys.has(opts.key)) return false; logKeys.add(opts.key); }
             const now = atIso && !isNaN(new Date(atIso)) ? new Date(atIso) : new Date();
             const timeStr = now.toTimeString().split(' ')[0];
-            logs.unshift({ time: timeStr, from: fromName, to: toName, message, dept, taskId });
-            
-            // Update token counter simulation
-            stats.tokens += Math.floor(Math.random() * 450) + 180;
+            const entry = { time: timeStr, ts: now.getTime(), seq: opts.seq || 0, from: fromName, to: toName, message, dept, taskId, runId: opts.runId || null, key: opts.key || null };
+            // newest first by server time (restored history can arrive after newer local entries)
+            let at = logs.findIndex(l => l.ts < entry.ts || (l.ts === entry.ts && l.runId === entry.runId && l.seq < entry.seq));
+            if (at === -1) at = logs.length;
+            logs.splice(at, 0, entry);
+            if (logs.length > LOG_LIMIT) logs.length = LOG_LIMIT;
+
+            // Update token counter simulation (live entries only)
+            if (!opts.replay) stats.tokens += Math.floor(Math.random() * 450) + 180;
             updateStatsUI();
             renderLogs();
+            return true;
+        }
+
+        let currentRunFilter = 'ALL';
+        function setRunFilter(runId) {
+            currentRunFilter = runId || 'ALL';
+            const select = document.getElementById('log-run-filter');
+            if (select && select.value !== currentRunFilter) select.value = currentRunFilter;
+            renderLogs();
+        }
+        function renderRunFilterOptions() {
+            const select = document.getElementById('log-run-filter');
+            if (!select) return;
+            const runs = [...wfRuns.values()].sort((a, b) => String(b.run.created_at).localeCompare(String(a.run.created_at)));
+            const label = {running:'กำลังทำงาน', completed:'สำเร็จ', failed:'ล้มเหลว', blocked:'ถูกระงับ'};
+            const options = [['ALL', 'ทุกกลุ่มงาน / ทุก Run']].concat(runs.map(r => [r.run.id,
+                wfTaskId(r.run.id) + ' · ' + (label[r.run.status] || r.run.status) + ' · ' + String(r.run.command || '').slice(0, 38) + ' (' + r.seen.size + ')']));
+            if (currentRunFilter !== 'ALL' && !wfRuns.has(currentRunFilter)) currentRunFilter = 'ALL';
+            select.innerHTML = options.map(([v, t]) => '<option value="' + escapeHtml(v) + '">' + escapeHtml(t) + '</option>').join('');
+            select.value = currentRunFilter;
         }
 
         function renderLogs() {
             const feed = document.getElementById('activity-log-feed');
-            const filtered = currentFilter === 'ALL' ? logs : logs.filter(l => l.dept === currentFilter);
+            const filtered = logs.filter(l => (currentFilter === 'ALL' || l.dept === currentFilter) && (currentRunFilter === 'ALL' || l.runId === currentRunFilter));
             document.getElementById('log-count').textContent = `${filtered.length} รายการ`;
 
             feed.innerHTML = filtered.map(log => {
@@ -2298,7 +2339,9 @@
                     <div class="p-2.5 rounded-xl bg-space-950/80 border border-slate-800/90 hover:border-slate-700 transition">
                         <div class="flex items-center justify-between text-[10px] mb-1">
                             <span class="font-mono text-slate-500">${log.time}</span>
-                            <span class="font-mono px-1.5 py-0.2 rounded border ${deptColor}">${escapeHtml(log.taskId)}</span>
+                            ${log.runId
+                                ? `<button type="button" data-run-id="${escapeHtml(log.runId)}" onclick="setRunFilter(this.dataset.runId)" title="ดูเฉพาะ Run นี้" class="font-mono px-1.5 py-0.2 rounded border ${deptColor} hover:brightness-125">${escapeHtml(log.taskId)}</button>`
+                                : `<span class="font-mono px-1.5 py-0.2 rounded border ${deptColor}">${escapeHtml(log.taskId)}</span>`}
                         </div>
                         <div class="font-medium text-[11px] text-amber-300 flex items-center gap-1 mb-0.5">
                             <span>${escapeHtml(log.from)}</span>
@@ -2644,6 +2687,20 @@
         const WF_AGENT_NAMES = {user:'ผู้ใช้งาน (Admin)', master:'Master Bot', creative:'Creative Bot', graphic:'Graphic Design', social:'แอดมินโซเชียล'};
         const WF_PATH = [['user','openbot'],['openbot','master'],['master','creative'],['creative','graphic'],['graphic','social'],['social','master']];
         let wfActiveRunId = null;
+        // Run registry (source of truth = Cloud D1 workflow_runs / workflow_events). Survives a page refresh because
+        // it is rebuilt from the API; seq per run makes every event idempotent in the activity log.
+        const wfRuns = new Map();          // runId -> { run, seen: Map(seq -> event) }
+        const wfFollowing = new Set();     // runIds this tab is currently driving / polling
+        let wfSyncTimer = null, wfSyncBusy = false;
+        const WF_SYNC_MS = 15000;
+        const wfTaskId = (runId) => 'WF-' + String(runId).slice(0, 6).toUpperCase();
+        function wfEntry(run) {
+            let entry = wfRuns.get(run.id);
+            if (!entry) { entry = { run, seen: new Map() }; wfRuns.set(run.id, entry); }
+            else entry.run = { ...entry.run, ...run };
+            return entry;
+        }
+        function wfSetSyncState(text) { const el = document.getElementById('log-sync-state'); if (el) el.textContent = text; }
         function isCreativeWorkflowIntent(text) {
             const value = String(text || '');
             if (/ไม่ต้อง|อย่า|ห้าม|ยกเลิก/.test(value)) return false;
@@ -2652,10 +2709,31 @@
         }
         function wfTime(iso) { const d = new Date(iso); return isNaN(d) ? '' : d.toTimeString().split(' ')[0]; }
         function wfClearPath() { WF_PATH.forEach(([a, b]) => setConnection(a, b, false)); }
-        function applyWorkflowEvent(e, taskId) {
+        // Records a server event once (run + seq). replay = history restored from the backend: logged with its server
+        // time but without re-playing chat bubbles / agent animations for work that already happened.
+        function wfRecordEvents(run, events, { replay = false } = {}) {
+            const entry = wfEntry(run);
+            const fresh = [];
+            for (const e of (events || []).slice().sort((a, b) => a.seq - b.seq)) {
+                if (entry.seen.has(e.seq)) continue;
+                entry.seen.set(e.seq, e);
+                fresh.push(e);
+                if (replay) logWorkflowEvent(e, run.id, true);
+                else applyWorkflowEvent(e, wfTaskId(run.id), run.id);
+            }
+            renderRunFilterOptions();
+            return fresh;
+        }
+        function logWorkflowEvent(e, runId, replay) {
             const from = e.from_agent, to = e.to_agent;
-            const label = '[LIVE ' + e.status + '] ' + e.message;
-            addActivityLog(WF_AGENT_NAMES[from] || from, WF_AGENT_NAMES[to] || to, label, 'MEDIA', taskId, e.created_at);
+            const label = '[' + (replay ? 'บันทึก' : 'LIVE') + ' ' + e.status + '] ' + e.message;
+            return addActivityLog(WF_AGENT_NAMES[from] || from, WF_AGENT_NAMES[to] || to, label, 'MEDIA', wfTaskId(runId), e.created_at,
+                { runId, key: 'wf:' + runId + ':' + e.seq, seq: e.seq, replay });
+        }
+        function applyWorkflowEvent(e, taskId, runId) {
+            const from = e.from_agent, to = e.to_agent;
+            if (runId) logWorkflowEvent(e, runId, false);
+            else addActivityLog(WF_AGENT_NAMES[from] || from, WF_AGENT_NAMES[to] || to, '[LIVE ' + e.status + '] ' + e.message, 'MEDIA', taskId, e.created_at);
             const owner = WF_AGENT_NAMES[to] || WF_AGENT_NAMES[from];
             const progress = {RECEIVED:5, TARGET:8, HANDOFF:{creative:25, graphic:45, social:85}[to] || 30, DONE: from === 'graphic' ? 55 : 95, UPLOADED:92, COMPLETED:100}[e.status];
             if (progress) updateTaskProgress(taskId, owner, progress);
@@ -2731,23 +2809,35 @@
             let view;
             try { view = await scRequest('/workflows', {method:'POST', body:JSON.stringify({command})}); }
             catch (error) { appendChatBubble('bot', 'เริ่ม Workflow ไม่สำเร็จ: ' + error.message); return; }
-            const run = view.run, taskId = 'WF-' + run.id.slice(0, 6).toUpperCase();
-            wfActiveRunId = run.id;
-            const seen = new Map();
-            const apply = (events) => (events || []).forEach(e => { if (!seen.has(e.seq)) { seen.set(e.seq, e); applyWorkflowEvent(e, taskId); } });
-            const lastSeq = () => seen.size ? Math.max(...seen.keys()) : 0;
-            activeTasks.unshift({ id: taskId, title: 'Workflow จริง: Creative → Graphic → โพสต์เพจ', owner: 'Master Bot', progress: 3 });
-            renderActiveTasks(); updateStatsUI();
+            const run = view.run, taskId = wfTaskId(run.id);
             appendChatBubble('bot', 'รับคำสั่งแล้ว · เริ่ม Workflow จริงบน Cloud (' + taskId + ')\nMaster Bot → Creative Bot → Graphic Design → แอดมินโซเชียล → เพจ "' + (run.account_name || '-') + '"');
-            apply(view.events);
+            await wfFollowRun(view, { resumed: false });
+        }
+
+        // Follows one running run in this tab: polls events every 1.5 s (live activity log) and drives /advance.
+        // /advance is safe to call again after a refresh or from another tab: the Worker runs one stage per call under a
+        // row lock and the publish stage reuses an existing publish record, so a run is never posted twice.
+        async function wfFollowRun(view, { resumed }) {
+            const run = view.run, taskId = wfTaskId(run.id);
+            if (wfFollowing.has(run.id)) return;
+            wfFollowing.add(run.id);
+            wfActiveRunId = run.id;
+            const entry = wfEntry(run);
+            if (!activeTasks.some(t => t.id === taskId)) {
+                activeTasks.unshift({ id: taskId, title: 'Workflow จริง: Creative → Graphic → โพสต์เพจ', owner: 'Master Bot', progress: 3 });
+                renderActiveTasks(); updateStatsUI();
+            }
+            if (resumed) appendChatBubble('bot', 'กลับมาติดตาม Workflow ที่ยังทำงานอยู่ (' + taskId + ') หลังรีเฟรชหน้า · สถานะดึงจาก Cloud และไม่สั่งโพสต์ซ้ำ');
+            wfRecordEvents(run, view.events);
+            const lastSeq = () => entry.seen.size ? Math.max(...entry.seen.keys()) : 0;
             let current = view;
             const poller = setInterval(async () => {
-                try { const v = await scRequest('/workflows/' + encodeURIComponent(run.id) + '?after=' + lastSeq()); apply(v.events); current = {...current, run: v.run, assets: v.assets}; } catch {}
+                try { const v = await scRequest('/workflows/' + encodeURIComponent(run.id) + '?after=' + lastSeq()); wfRecordEvents(v.run, v.events); current = {...current, run: v.run, assets: v.assets}; } catch {}
             }, 1500);
             try {
                 for (let i = 0; i < 24 && current.run.status === 'running'; i++) {
                     const v = await scRequest('/workflows/' + encodeURIComponent(run.id) + '/advance?after=' + lastSeq(), {method:'POST'});
-                    apply(v.events);
+                    wfRecordEvents(v.run, v.events);
                     current = v;
                     if (!v.advanced && v.run.status === 'running') await new Promise(r => setTimeout(r, 3000));
                 }
@@ -2757,16 +2847,53 @@
                 clearInterval(poller);
             }
             const final = await scRequest('/workflows/' + encodeURIComponent(run.id)).catch(() => current);
-            apply(final.events);
-            wfActiveRunId = null;
+            wfRecordEvents(final.run, final.events);
+            wfFollowing.delete(run.id);
+            if (wfActiveRunId === run.id) wfActiveRunId = null;
             if (final.run.status === 'completed') {
                 WF_PATH.forEach(([a, b]) => setConnection(a, b, true));
                 completeTask(taskId);
                 showToast('Workflow สำเร็จ', 'โพสต์ลงเพจแล้ว · ' + (final.run.post_id || ''));
-            } else {
+            } else if (final.run.status !== 'running') {
                 activeTasks = activeTasks.filter(t => t.id !== taskId); renderActiveTasks(); updateStatsUI();
             }
-            await appendWorkflowResultCard(final, [...seen.values()].sort((a, b) => a.seq - b.seq));
+            if (final.run.status !== 'running') await appendWorkflowResultCard(final, [...entry.seen.values()].sort((a, b) => a.seq - b.seq));
+        }
+
+        // Restores the activity log from the Cloud after a refresh / login, then keeps it in sync (runs started in
+        // another tab, or advanced by the cron, appear without a reload). Never posts: only GETs, plus /advance for
+        // runs still running (idempotent, see wfFollowRun).
+        async function wfSyncRuns({ initial = false } = {}) {
+            if (!sessionStorage.getItem('sc_session') || wfSyncBusy) return;
+            wfSyncBusy = true;
+            try {
+                const list = await scRequest('/workflows');
+                const runs = Array.isArray(list) ? list : (list.runs || list.workflows || list.items || []);
+                for (const run of runs.slice().reverse()) {
+                    const known = wfRuns.get(run.id);
+                    const changed = !known || known.run.status !== run.status || known.run.stage !== run.stage || known.run.status === 'running';
+                    if (!changed || wfFollowing.has(run.id)) { if (known) known.run = { ...known.run, ...run }; continue; }
+                    const after = known && known.seen.size ? Math.max(...known.seen.keys()) : 0;
+                    const view = await scRequest('/workflows/' + encodeURIComponent(run.id) + (after ? '?after=' + after : ''));
+                    if (view.run.status === 'running') wfFollowRun(view, { resumed: initial && !known });
+                    else wfRecordEvents(view.run, view.events, { replay: initial || !known });
+                }
+                renderRunFilterOptions();
+                wfSetSyncState('ซิงก์ ' + new Date().toTimeString().slice(0, 5));
+            } catch (error) {
+                wfSetSyncState('ซิงก์ไม่สำเร็จ');
+                console.warn('workflow sync failed', error);
+            } finally { wfSyncBusy = false; }
+        }
+        function wfStartSync() {
+            if (!sessionStorage.getItem('sc_session')) { wfSetSyncState('ยังไม่เข้าสู่ระบบ Social'); return; }
+            wfSyncRuns({ initial: wfRuns.size === 0 });
+            if (!wfSyncTimer) wfSyncTimer = setInterval(() => { if (!document.hidden) wfSyncRuns(); }, WF_SYNC_MS);
+        }
+        function wfStopSync() {
+            if (wfSyncTimer) clearInterval(wfSyncTimer);
+            wfSyncTimer = null;
+            wfSetSyncState('ยังไม่เข้าสู่ระบบ Social');
         }
 
         function handleUserSubmit(e) {
@@ -3268,6 +3395,8 @@
 
             // Seed initial realistic logs
             addActivityLog('OpenBot Gateway', 'Master Bot', 'Dashboard พร้อมใช้งาน · สถานะงานภายนอกต้องตรวจจาก API จริง', 'CORE', 'GW-LOCAL-8000');
+            // Rebuild Cloud workflow runs + their activity from the backend (survives refresh) and keep syncing.
+            wfStartSync();
         }
 
         window.addEventListener('DOMContentLoaded', init);
