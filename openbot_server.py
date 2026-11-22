@@ -20,7 +20,8 @@ from social_commerce import router as social_commerce_router, init_social_db
 APP_VERSION = "1.3.0"
 DEFAULT_ORIGINS = (
     "http://localhost:5500,http://127.0.0.1:5500,"
-    "http://localhost:8000,http://127.0.0.1:8000,https://siam-dev5.github.io"
+    "http://localhost:8000,http://127.0.0.1:8000,https://siam-dev5.github.io,"
+    "https://social-api.siamhrbp.com"
 )
 ALLOWED_ORIGINS = [
     origin.strip()

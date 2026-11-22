@@ -1,4 +1,6 @@
 const ORIGIN = "https://siam-dev5.github.io";
+// The Dashboard is served both from GitHub Pages and from this Worker's own origin.
+const DASHBOARD_ORIGINS = [ORIGIN, "https://social-api.siamhrbp.com"];
 const PLATFORMS = ["facebook","instagram","youtube","tiktok","shopee_affiliate","lazada_affiliate"];
 const now = () => new Date().toISOString();
 const json = (data,status=200,headers={}) => new Response(JSON.stringify(data),{status,headers:{"Content-Type":"application/json; charset=utf-8","Cache-Control":"no-store",...headers}});
@@ -9,7 +11,7 @@ const sha = async (v) => b64(await crypto.subtle.digest("SHA-256",new TextEncode
 const cors = (request) => {
  const origin=request.headers.get("Origin")||"";
  const headers={"Access-Control-Allow-Methods":"GET,POST,DELETE,OPTIONS","Access-Control-Allow-Headers":"Authorization,Content-Type,X-Bootstrap-Key,Idempotency-Key","Vary":"Origin"};
- if(origin===ORIGIN) headers["Access-Control-Allow-Origin"]=origin;
+ if(DASHBOARD_ORIGINS.includes(origin)) headers["Access-Control-Allow-Origin"]=origin;
  return headers;
 };
 const graphVersion = (env) => (env.META_GRAPH_API_VERSION||"v27.0").trim();
@@ -93,7 +95,7 @@ export function buildMetaAuthorizationUrl(env,state,platform="instagram") {
 }
 function metaResultPage(status,message) {
  const payload=JSON.stringify({type:"ALPHA_CENTAURI_META_OAUTH",status,message});
- return new Response("<!doctype html><html lang='th'><meta charset='utf-8'><title>Meta connection</title><body style='font:16px sans-serif;background:#090d1e;color:#e2e8f0;padding:32px'><p>"+(status==="connected"?"เชื่อมต่อ Meta สำเร็จ":"การเชื่อมต่อ Meta ไม่สำเร็จ")+"</p><script>const data="+payload+";if(window.opener){window.opener.postMessage(data,'"+ORIGIN+"');}setTimeout(()=>window.close(),900);</script></body></html>",{status:200,headers:{"Content-Type":"text/html; charset=utf-8","Cache-Control":"no-store","X-Content-Type-Options":"nosniff"}});
+ return new Response("<!doctype html><html lang='th'><meta charset='utf-8'><title>Meta connection</title><body style='font:16px sans-serif;background:#090d1e;color:#e2e8f0;padding:32px'><p>"+(status==="connected"?"เชื่อมต่อ Meta สำเร็จ":"การเชื่อมต่อ Meta ไม่สำเร็จ")+"</p><script>const data="+payload+";if(window.opener){for(const o of "+JSON.stringify(DASHBOARD_ORIGINS)+"){try{window.opener.postMessage(data,o);}catch(e){}}}setTimeout(()=>window.close(),900);</script></body></html>",{status:200,headers:{"Content-Type":"text/html; charset=utf-8","Cache-Control":"no-store","X-Content-Type-Options":"nosniff"}});
 }
 async function graphGet(env,path,params={}) {
  const url=new URL("https://graph.facebook.com/"+graphVersion(env)+"/"+path.replace(/^\/+/, ""));
@@ -221,9 +223,29 @@ async function handleWebhook(request,env,url) {
   .bind(random(16),eventHash,safeText(payload.object,80),payload.entry.length,JSON.stringify(payload),now()).run();
  return json({ok:true,duplicate:(saved.meta?.changes||0)===0});
 }
+// Browser navigations to the bare origin receive the Dashboard (Workers Static Assets).
+// Every other request, including GET / from API clients and monitors that do not ask
+// for HTML, keeps the existing JSON health response and API routes.
+export function wantsDashboard(request,url,env) {
+ if(!env?.ASSETS||url.pathname!=="/") return false;
+ if(request.method!=="GET"&&request.method!=="HEAD") return false;
+ return (request.headers.get("Accept")||"").toLowerCase().includes("text/html");
+}
+async function serveDashboard(request,env) {
+ const asset=await env.ASSETS.fetch(new Request(new URL("/",request.url),{method:request.method,headers:request.headers}));
+ if(!asset.ok) return json({error:"Dashboard unavailable"},503);
+ const headers=new Headers(asset.headers);
+ headers.set("Cache-Control","no-cache");
+ headers.set("Vary","Accept");
+ headers.set("X-Content-Type-Options","nosniff");
+ headers.set("Referrer-Policy","strict-origin-when-cross-origin");
+ headers.set("X-Frame-Options","DENY");
+ return new Response(asset.body,{status:200,headers});
+}
 async function handle(request,env) {
  const url=new URL(request.url),path=url.pathname.replace(/^\/api\/social-commerce/,"")||"/",method=request.method;
  if(method==="OPTIONS") return new Response(null,{status:204,headers:cors(request)});
+ if(wantsDashboard(request,url,env)) return serveDashboard(request,env);
  if(path==="/webhooks/meta") return handleWebhook(request,env,url);
  if(method==="GET"&&path==="/oauth/meta/callback") return finishMetaOAuth(request,env,url);
  if(method==="GET"&&(path==="/"||path==="/health")) {
