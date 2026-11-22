@@ -101,6 +101,92 @@ function metaResultPage(status,message) {
  const payload=JSON.stringify({type:"ALPHA_CENTAURI_META_OAUTH",status,message});
  return new Response("<!doctype html><html lang='th'><meta charset='utf-8'><title>Meta connection</title><body style='font:16px sans-serif;background:#090d1e;color:#e2e8f0;padding:32px'><p>"+(status==="connected"?"เชื่อมต่อ Meta สำเร็จ":"การเชื่อมต่อ Meta ไม่สำเร็จ")+"</p><script>const data="+payload+";if(window.opener){for(const o of "+JSON.stringify(DASHBOARD_ORIGINS)+"){try{window.opener.postMessage(data,o);}catch(e){}}}setTimeout(()=>window.close(),900);</script></body></html>",{status:200,headers:{"Content-Type":"text/html; charset=utf-8","Cache-Control":"no-store","X-Content-Type-Options":"nosniff"}});
 }
+// ---- "แอดมินโซเชียล" auto-like: the connected Page likes its own posts only ----
+const AUTO_LIKE_MAX_PER_RUN=5, AUTO_LIKE_SCAN_LIMIT=10, AUTO_LIKE_MAX_BACKFILL=5;
+export function autoLikeReadiness(scopes=[],tasks=[]) {
+ const granted=new Set(Array.isArray(scopes)?scopes:[]),assigned=new Set(Array.isArray(tasks)?tasks:[]),missing=[];
+ if(!granted.has("pages_manage_engagement")) missing.push("pages_manage_engagement");
+ if(!granted.has("pages_read_engagement")) missing.push("pages_read_engagement");
+ if(!(assigned.has("CREATE_CONTENT")||assigned.has("MANAGE"))) missing.push("Page task CREATE_CONTENT");
+ return {ready:missing.length===0,missing};
+}
+// Only posts authored by this Page: the id must be "<pageId>_<postId>" and, when present, from.id must be the Page.
+export function filterOwnPagePosts(pageId,posts=[]) {
+ const id=String(pageId);
+ return (Array.isArray(posts)?posts:[]).filter(p=>p&&typeof p.id==="string"&&p.id.startsWith(id+"_")&&(!p.from||String(p.from.id)===id));
+}
+async function listOwnPagePosts(env,pageId,token,limit=AUTO_LIKE_SCAN_LIMIT) {
+ const data=await graphGet(env,encodeURIComponent(pageId)+"/posts",{fields:"id,created_time,from,message,permalink_url",limit,access_token:token});
+ return filterOwnPagePosts(pageId,data.data).sort((a,b)=>Date.parse(b.created_time||0)-Date.parse(a.created_time||0));
+}
+async function queuePageLike(env,account,post,source) {
+ const stamp=now();
+ const r=await env.DB.prepare("INSERT OR IGNORE INTO page_post_likes(id,owner_user_id,account_id,page_id,post_id,post_created_time,post_permalink,post_message_preview,source,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,'pending',?,?)")
+  .bind(random(16),account.owner_user_id,account.id,String(account.external_account_id),post.id,post.created_time||null,post.permalink_url||null,safeText(post.message||"",120),source,stamp,stamp).run();
+ return (r.meta?.changes||0)===1;
+}
+async function likePagePost(env,postId,token) {
+ const body=new FormData();
+ body.set("access_token",token);
+ if(env.META_APP_SECRET) {
+  const key=await crypto.subtle.importKey("raw",new TextEncoder().encode(env.META_APP_SECRET),{name:"HMAC",hash:"SHA-256"},false,["sign"]);
+  const proof=await crypto.subtle.sign("HMAC",key,new TextEncoder().encode(token));
+  body.set("appsecret_proof",Array.from(new Uint8Array(proof),b=>b.toString(16).padStart(2,"0")).join(""));
+ }
+ const response=await fetch("https://graph.facebook.com/"+graphVersion(env)+"/"+encodeURIComponent(postId)+"/likes",{method:"POST",body,headers:{Accept:"application/json"}});
+ const meta=await response.json().catch(()=>({}));
+ return {ok:response.ok&&!meta.error&&meta.success===true,error:meta.error?.message||(!response.ok?response.statusText:null)};
+}
+// Queue new Page posts (created after enabled_at), then like pending ledger rows. Safe to run concurrently:
+// the ledger is UNIQUE(account_id,post_id) and each row is claimed with a pending->liking update.
+export async function runAutoLikeForAccount(env,account,settings,actor) {
+ const summary={account_id:account.id,page:account.account_name,scanned:0,queued:0,liked:0,failed:0,unknown:0};
+ const readiness=autoLikeReadiness(JSON.parse(account.scopes_json||"[]"),JSON.parse(account.page_tasks_json||"[]"));
+ if(account.status!=="connected"||!account.encrypted_access_token||!readiness.ready) { summary.error="Page not ready for auto-like: "+(readiness.missing.join(", ")||"not connected"); return summary; }
+ const token=await decrypt(account.encrypted_access_token,env);
+ try {
+  const posts=await listOwnPagePosts(env,account.external_account_id,token);
+  summary.scanned=posts.length;
+  const since=Date.parse(settings.enabled_at||"");
+  for(const post of posts) if(Number.isFinite(since)&&Date.parse(post.created_time||0)>since&&await queuePageLike(env,account,post,"auto")) summary.queued++;
+ } catch(error) { summary.error=safeText(error?.message||"Could not list Page posts",300); }
+ const {results:pending=[]}=await env.DB.prepare("SELECT id,post_id,source FROM page_post_likes WHERE account_id=? AND status='pending' ORDER BY post_created_time LIMIT ?").bind(account.id,AUTO_LIKE_MAX_PER_RUN).all();
+ for(const row of pending) {
+  const claim=await env.DB.prepare("UPDATE page_post_likes SET status='liking',updated_at=? WHERE id=? AND status='pending'").bind(now(),row.id).run();
+  if((claim.meta?.changes||0)!==1) continue;
+  let result;
+  try { result=await likePagePost(env,row.post_id,token); }
+  catch {
+   await env.DB.prepare("UPDATE page_post_likes SET status='unknown',error_message=?,updated_at=? WHERE id=?").bind("Network error after like request; not retried automatically.",now(),row.id).run();
+   await audit(env,account.owner_user_id,"page_post_like_unknown","page_post",row.post_id,actor,{account_id:account.id,source:row.source});
+   summary.unknown++; continue;
+  }
+  if(result.ok) {
+   await env.DB.prepare("UPDATE page_post_likes SET status='liked',error_message=NULL,liked_at=?,updated_at=? WHERE id=?").bind(now(),now(),row.id).run();
+   await audit(env,account.owner_user_id,"page_post_liked","page_post",row.post_id,actor,{account_id:account.id,source:row.source});
+   summary.liked++;
+  } else {
+   const message=safeText(result.error||"Facebook did not confirm the like",300);
+   await env.DB.prepare("UPDATE page_post_likes SET status='failed',error_message=?,updated_at=? WHERE id=?").bind(message,now(),row.id).run();
+   await audit(env,account.owner_user_id,"page_post_like_failed","page_post",row.post_id,actor,{account_id:account.id,source:row.source,error:message});
+   summary.failed++;
+  }
+ }
+ await env.DB.prepare("UPDATE auto_like_settings SET last_run_at=?,last_run_result=?,updated_at=? WHERE account_id=?").bind(now(),JSON.stringify(summary),now(),account.id).run();
+ return summary;
+}
+const AUTO_LIKE_ACCOUNT_SQL="SELECT id,owner_user_id,external_account_id,account_name,status,scopes_json,page_tasks_json,encrypted_access_token FROM social_accounts";
+export async function runScheduledAutoLike(env) {
+ const {results=[]}=await env.DB.prepare("SELECT s.account_id,s.enabled_at FROM auto_like_settings s JOIN social_accounts a ON a.id=s.account_id WHERE s.enabled=1 AND a.platform='facebook' AND a.status='connected'").all();
+ const out=[];
+ for(const s of results) {
+  const account=await env.DB.prepare(AUTO_LIKE_ACCOUNT_SQL+" WHERE id=? AND platform='facebook'").bind(s.account_id).first();
+  if(!account) continue;
+  try { out.push(await runAutoLikeForAccount(env,account,s,"auto_like_cron")); }
+  catch(error) { console.error("auto-like",{account:s.account_id,message:safeText(error?.message||"unknown",200)}); }
+ }
+ return out;
+}
 async function graphGet(env,path,params={}) {
  const url=new URL("https://graph.facebook.com/"+graphVersion(env)+"/"+path.replace(/^\/+/, ""));
  const query={...params};
@@ -311,6 +397,46 @@ async function handle(request,env) {
   await audit(env,user.id,"account_disconnected","account",a.id,user.email,{platform:a.platform});
   return json({id:a.id,status:"disconnected"},200,cors(request));
  }
+ if(method==="GET"&&path==="/automation/auto-like") {
+  const {results:accounts=[]}=await env.DB.prepare("SELECT a.id,a.account_name,a.external_account_id,a.status,a.scopes_json,a.page_tasks_json,s.enabled,s.enabled_at,s.backfill_count,s.last_run_at,s.last_run_result FROM social_accounts a LEFT JOIN auto_like_settings s ON s.account_id=a.id WHERE a.owner_user_id=? AND a.platform='facebook' ORDER BY a.account_name").bind(user.id).all();
+  const {results:likes=[]}=await env.DB.prepare("SELECT l.post_id,l.post_permalink,l.post_message_preview,l.post_created_time,l.source,l.status,l.error_message,l.liked_at,l.created_at,a.account_name FROM page_post_likes l JOIN social_accounts a ON a.id=l.account_id WHERE l.owner_user_id=? ORDER BY l.created_at DESC LIMIT 30").bind(user.id).all();
+  return json({schedule:"every 5 minutes",accounts:accounts.map(a=>{const r=autoLikeReadiness(JSON.parse(a.scopes_json||"[]"),JSON.parse(a.page_tasks_json||"[]"));return {id:a.id,account_name:a.account_name,page_id:a.external_account_id,status:a.status,enabled:!!a.enabled,enabled_at:a.enabled_at||null,backfill_count:a.backfill_count||0,last_run_at:a.last_run_at||null,last_run_result:a.last_run_result?JSON.parse(a.last_run_result):null,ready:r.ready,missing:r.missing};}),likes},200,cors(request));
+ }
+ if(method==="POST"&&path==="/automation/auto-like") {
+  const b=await request.json().catch(()=>({}));
+  const account=await env.DB.prepare(AUTO_LIKE_ACCOUNT_SQL+" WHERE id=? AND owner_user_id=? AND platform='facebook'").bind(String(b.account_id||""),user.id).first();
+  if(!account) return json({error:"Facebook Page not found"},404,cors(request));
+  const stamp=now();
+  if(b.enabled!==true) {
+   await env.DB.prepare("INSERT INTO auto_like_settings(account_id,owner_user_id,enabled,updated_by,created_at,updated_at) VALUES(?,?,0,?,?,?) ON CONFLICT(account_id) DO UPDATE SET enabled=0,updated_by=excluded.updated_by,updated_at=excluded.updated_at").bind(account.id,user.id,user.email,stamp,stamp).run();
+   await audit(env,user.id,"auto_like_disabled","account",account.id,user.email,{});
+   return json({account_id:account.id,enabled:false},200,cors(request));
+  }
+  const readiness=autoLikeReadiness(JSON.parse(account.scopes_json||"[]"),JSON.parse(account.page_tasks_json||"[]"));
+  if(account.status!=="connected"||!account.encrypted_access_token||!readiness.ready) return json({error:"Facebook Page is not ready for auto-like. Reconnect it and grant the required access.",missing_permissions:readiness.missing},403,cors(request));
+  const backfill=Math.max(0,Math.min(AUTO_LIKE_MAX_BACKFILL,Number.isInteger(b.backfill_count)?b.backfill_count:2));
+  const existing=await env.DB.prepare("SELECT enabled,enabled_at FROM auto_like_settings WHERE account_id=?").bind(account.id).first();
+  const enabledAt=existing?.enabled&&existing.enabled_at?existing.enabled_at:stamp;
+  await env.DB.prepare("INSERT INTO auto_like_settings(account_id,owner_user_id,enabled,enabled_at,backfill_count,updated_by,created_at,updated_at) VALUES(?,?,1,?,?,?,?,?) ON CONFLICT(account_id) DO UPDATE SET enabled=1,enabled_at=excluded.enabled_at,backfill_count=excluded.backfill_count,updated_by=excluded.updated_by,updated_at=excluded.updated_at").bind(account.id,user.id,enabledAt,backfill,user.email,stamp,stamp).run();
+  const queuedBackfill=[];
+  if(backfill>0) {
+   const token=await decrypt(account.encrypted_access_token,env);
+   const posts=(await listOwnPagePosts(env,account.external_account_id,token)).slice(0,backfill);
+   for(const post of posts) if(await queuePageLike(env,{...account,owner_user_id:user.id},post,"backfill")) queuedBackfill.push(post.id);
+  }
+  await audit(env,user.id,"auto_like_enabled","account",account.id,user.email,{enabled_at:enabledAt,backfill_count:backfill,backfill_post_ids:queuedBackfill});
+  const run=await runAutoLikeForAccount(env,{...account,owner_user_id:user.id},{enabled_at:enabledAt},user.email);
+  return json({account_id:account.id,enabled:true,enabled_at:enabledAt,backfill_queued:queuedBackfill,run},200,cors(request));
+ }
+ if(method==="POST"&&path==="/automation/auto-like/run") {
+  const {results=[]}=await env.DB.prepare("SELECT account_id,enabled_at FROM auto_like_settings WHERE owner_user_id=? AND enabled=1").bind(user.id).all();
+  const runs=[];
+  for(const s of results) {
+   const account=await env.DB.prepare(AUTO_LIKE_ACCOUNT_SQL+" WHERE id=? AND owner_user_id=? AND platform='facebook'").bind(s.account_id,user.id).first();
+   if(account) runs.push(await runAutoLikeForAccount(env,account,s,user.email));
+  }
+  return json({runs},200,cors(request));
+ }
  if(method==="GET"&&path==="/content") {
   const status=url.searchParams.get("status");
   const q=status?env.DB.prepare("SELECT * FROM content_items WHERE owner_user_id=? AND status=? ORDER BY updated_at DESC").bind(user.id,status):env.DB.prepare("SELECT * FROM content_items WHERE owner_user_id=? ORDER BY updated_at DESC").bind(user.id);
@@ -437,4 +563,8 @@ export default { async fetch(request,env) {
  const headers=cors(request);
  try { return await handle(request,env); }
  catch(e) { console.error("social-commerce-api",{name:e?.name||"Error",message:safeText(e?.message||"unknown",300)}); return json({error:"Internal server error"},500,headers); }
+},
+// Cron trigger (wrangler.toml [triggers]): runs the "แอดมินโซเชียล" auto-like for enabled Pages.
+async scheduled(event,env,ctx) {
+ ctx.waitUntil(runScheduledAutoLike(env).then(r=>console.log("auto-like-cron",{accounts:r.length,results:r.map(x=>({liked:x.liked,failed:x.failed,queued:x.queued,error:x.error||null}))})).catch(e=>console.error("auto-like-cron",{message:safeText(e?.message||"unknown",200)})));
 }};

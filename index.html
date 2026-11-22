@@ -845,6 +845,7 @@
           <button class="sc-tab rounded-lg border border-fuchsia-400/40 bg-fuchsia-500/15 px-3 py-2 text-xs text-fuchsia-200" onclick="switchSocialTab('accounts')">บัญชีที่เชื่อมต่อ</button>
           <button class="sc-tab rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-300" onclick="switchSocialTab('content')">Content &amp; Approval</button>
           <button class="sc-tab rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-300" onclick="switchSocialTab('access')">การตั้งค่า API</button>
+          <button class="sc-tab rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-300" onclick="switchSocialTab('autolike')">แอดมินโซเชียล · Auto-Like</button>
           <span id="sc-gateway-state" class="ml-auto self-center text-xs text-amber-300">กำลังตรวจสอบ Cloud API…</span>
         </div>
         <div id="sc-panel" class="min-h-[360px] overflow-y-auto p-4"></div>
@@ -942,7 +943,7 @@
         function switchSocialTab(tab) {
             scActiveTab = tab;
             document.querySelectorAll('.sc-tab').forEach((button, index) => {
-                const active = ['accounts','content','access'][index] === tab;
+                const active = ['accounts','content','access','autolike'][index] === tab;
                 button.className = 'sc-tab rounded-lg border px-3 py-2 text-xs ' +
                     (active ? 'border-fuchsia-400/40 bg-fuchsia-500/15 text-fuchsia-200' : 'border-slate-700 text-slate-300');
             });
@@ -950,6 +951,48 @@
             if (tab === 'accounts') renderSocialAccounts();
             if (tab === 'content') renderSocialContent();
             if (tab === 'access') renderSocialAccess();
+            if (tab === 'autolike') renderAutoLike();
+        }
+        // "แอดมินโซเชียล" auto-like: the connected Page likes its own posts (Cloud Worker cron every 5 minutes).
+        const AUTO_LIKE_STATUS_TEXT = {pending:'รอคิว', liking:'กำลังกดถูกใจ', liked:'กดถูกใจแล้ว', failed:'ไม่สำเร็จ', unknown:'ไม่ทราบผล (ไม่ลองซ้ำ)'};
+        async function renderAutoLike(note) {
+            const panel = document.getElementById('sc-panel');
+            panel.innerHTML = '<p class="text-xs text-slate-400">กำลังโหลดสถานะ Auto-Like…</p>';
+            try {
+                const data = await scRequest('/automation/auto-like');
+                const accounts = (data.accounts || []).filter(a => a.status === 'connected');
+                const cards = accounts.length ? accounts.map(a => {
+                    const last = a.last_run_result || {};
+                    const state = a.enabled ? '<span class="text-emerald-300">● เปิดใช้งานอัตโนมัติ</span>' : '<span class="text-slate-400">○ ปิดอยู่</span>';
+                    const blockers = a.ready ? '' : '<p class="mt-2 text-[11px] text-amber-300">ยังใช้ไม่ได้: ขาด ' + escapeHtml((a.missing || []).join(', ')) + ' · กรุณาเชื่อมต่อ Facebook ใหม่</p>';
+                    const action = !a.ready ? '' : a.enabled
+                        ? '<button type="button" onclick="autoLikeRunNow()" class="rounded-lg border border-sky-400/40 bg-sky-500/10 px-3 py-2 text-xs text-sky-200">ตรวจโพสต์ใหม่ตอนนี้</button><button type="button" onclick="autoLikeToggle(&quot;' + a.id + '&quot;,false)" class="rounded-lg border border-rose-400/30 px-3 py-2 text-xs text-rose-200">ปิด Auto-Like</button>'
+                        : '<button type="button" onclick="autoLikeToggle(&quot;' + a.id + '&quot;,true)" class="rounded-lg border border-emerald-400/40 bg-emerald-500/15 px-3 py-2 text-xs text-emerald-100">เปิด Auto-Like (กดถูกใจ 2 โพสต์ล่าสุด + โพสต์ใหม่)</button>';
+                    return '<article class="rounded-xl border border-slate-700 bg-slate-950/60 p-4"><div class="flex flex-wrap items-center justify-between gap-2"><div><h3 class="text-sm font-semibold text-white">' + escapeHtml(a.account_name) + '</h3><p class="text-[11px] text-slate-500">Page ID ' + escapeHtml(a.page_id) + '</p></div><div class="text-xs">' + state + '</div></div>' +
+                        '<p class="mt-2 text-[11px] text-slate-300">รอบตรวจ: ทุก 5 นาที (Cloudflare Cron) · เริ่มนับโพสต์ใหม่ตั้งแต่: ' + escapeHtml(a.enabled_at ? new Date(a.enabled_at).toLocaleString('th-TH') : '-') + '</p>' +
+                        '<p class="text-[11px] text-slate-300">ตรวจล่าสุด: ' + escapeHtml(a.last_run_at ? new Date(a.last_run_at).toLocaleString('th-TH') : 'ยังไม่เคยรัน') + (a.last_run_at ? ' · สแกน ' + (last.scanned || 0) + ' โพสต์ · กดถูกใจ ' + (last.liked || 0) + ' · ไม่สำเร็จ ' + (last.failed || 0) + (last.error ? ' · ' + escapeHtml(last.error) : '') : '') + '</p>' +
+                        blockers + '<div class="mt-3 flex flex-wrap gap-2">' + action + '</div></article>';
+                }).join('') : '<p class="text-xs text-amber-300">ยังไม่มี Facebook Page ที่เชื่อมต่อ</p>';
+                const rows = (data.likes || []).map(l => '<tr class="border-t border-slate-800"><td class="py-1.5 pr-2 text-[11px] text-slate-400">' + escapeHtml(new Date(l.liked_at || l.created_at).toLocaleString('th-TH')) + '</td><td class="pr-2 text-[11px] text-slate-200">' + (l.post_permalink ? '<a class="underline" target="_blank" rel="noopener" href="' + escapeHtml(l.post_permalink) + '">' + escapeHtml(l.post_message_preview || l.post_id) + '</a>' : escapeHtml(l.post_message_preview || l.post_id)) + '</td><td class="pr-2 text-[11px] text-slate-400">' + (l.source === 'backfill' ? 'โพสต์ล่าสุดตอนเปิดใช้' : 'โพสต์ใหม่') + '</td><td class="text-[11px] ' + (l.status === 'liked' ? 'text-emerald-300' : l.status === 'failed' || l.status === 'unknown' ? 'text-rose-300' : 'text-amber-300') + '">' + escapeHtml(AUTO_LIKE_STATUS_TEXT[l.status] || l.status) + (l.error_message ? ' · ' + escapeHtml(l.error_message) : '') + '</td></tr>').join('');
+                panel.innerHTML = '<div class="space-y-4">' + (note ? '<p id="sc-autolike-note" class="rounded-lg border border-sky-400/30 bg-sky-500/10 p-2 text-xs text-sky-100">' + escapeHtml(note) + '</p>' : '') +
+                    '<p class="text-xs leading-6 text-slate-400">บอทแอดมินโซเชียลกดถูกใจในนามเพจ เฉพาะโพสต์ที่เพจนั้นเป็นผู้โพสต์เอง ไม่กดถูกใจโพสต์ของผู้อื่น ทุกโพสต์ถูกบันทึกครั้งเดียว (กันกดซ้ำ) และเก็บ Audit Log</p>' + cards +
+                    '<section class="rounded-xl border border-slate-700 bg-slate-950/60 p-4"><h3 class="text-sm font-semibold text-white">บันทึกการกดถูกใจ</h3>' + (rows ? '<table class="mt-2 w-full text-left"><thead><tr class="text-[10px] uppercase text-slate-500"><th>เวลา</th><th>โพสต์</th><th>ประเภท</th><th>สถานะ</th></tr></thead><tbody>' + rows + '</tbody></table>' : '<p class="mt-2 text-xs text-slate-500">ยังไม่มีรายการ</p>') + '</section></div>';
+            } catch (error) { panel.textContent = 'โหลดสถานะ Auto-Like ไม่ได้: ' + error.message; }
+        }
+        async function autoLikeToggle(accountId, enabled) {
+            if (enabled && !confirm('เปิด Auto-Like: เพจจะกดถูกใจ 2 โพสต์ล่าสุดของเพจทันที และกดถูกใจโพสต์ใหม่ของเพจโดยอัตโนมัติทุก 5 นาที ยืนยันหรือไม่?')) return;
+            try {
+                const result = await scRequest('/automation/auto-like', {method:'POST', body:JSON.stringify({account_id:accountId, enabled, backfill_count:2})});
+                const run = result.run || {};
+                await renderAutoLike(enabled ? 'เปิดใช้งานแล้ว · กดถูกใจ ' + (run.liked || 0) + ' โพสต์ · ไม่สำเร็จ ' + (run.failed || 0) + (run.error ? ' · ' + run.error : '') : 'ปิด Auto-Like แล้ว');
+            } catch (error) { await renderAutoLike('ดำเนินการไม่สำเร็จ: ' + error.message); }
+        }
+        async function autoLikeRunNow() {
+            try {
+                const result = await scRequest('/automation/auto-like/run', {method:'POST'});
+                const r = (result.runs || [])[0] || {};
+                await renderAutoLike('ตรวจแล้ว · สแกน ' + (r.scanned || 0) + ' โพสต์ · โพสต์ใหม่ ' + (r.queued || 0) + ' · กดถูกใจ ' + (r.liked || 0) + (r.error ? ' · ' + r.error : ''));
+            } catch (error) { await renderAutoLike('ตรวจไม่สำเร็จ: ' + error.message); }
         }
         async function renderSocialAccounts() {
             const panel = document.getElementById('sc-panel');

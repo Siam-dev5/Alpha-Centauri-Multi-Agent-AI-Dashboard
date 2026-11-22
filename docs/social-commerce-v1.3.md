@@ -52,3 +52,12 @@ Affiliate marketing is the active business model. The user promotes third-party 
 
 ## Current limitation
 Facebook Page image publishing is available only for OAuth-connected Pages that pass live permission and Page-task checks. Existing accounts with empty permission metadata must reconnect after the permission-discovery fix. Instagram, YouTube, TikTok, Shopee Affiliate and Lazada Affiliate publishing/reporting remain disabled until their separate adapters and official access reviews are completed. A successful CI run is not a real-account publication test.
+
+## "แอดมินโซเชียล" auto-like (Facebook Page)
+- The connected Page likes **its own posts only** through `POST /{post-id}/likes` with the Page access token (Graph API v27.0). Requires `pages_manage_engagement`, `pages_read_engagement` and the Page task `CREATE_CONTENT` (or `MANAGE`).
+- Candidate posts come from `GET /{page-id}/posts`; a post is eligible only when its id is `<pageId>_<postId>` and `from.id` (when present) is the Page. Visitor posts, tagged posts and other Pages are never liked.
+- Enabling (Social & Commerce → แอดมินโซเชียล · Auto-Like) likes the latest N own posts (default 2, max 5) once, then a Cloudflare Cron trigger (`*/5 * * * *`) likes own posts created after `enabled_at`. At most 5 likes per run.
+- Idempotency: `page_post_likes` is `UNIQUE(account_id, post_id)` and each row is claimed `pending → liking` before the Graph call, so concurrent cron/manual runs cannot like twice. Failed or unknown results are logged and **not retried automatically**.
+- Audit events: `auto_like_enabled`, `auto_like_disabled`, `page_post_liked`, `page_post_like_failed`, `page_post_like_unknown`. Each run's summary is stored in `auto_like_settings.last_run_result`.
+- Meta deprecated reading per-post likes (`GET /{post-id}/likes`, since v8.0 / 2 Nov 2020), so the ledger, not Facebook, is the record of what the bot already liked.
+- Migration: `migrations/0007_page_auto_like.sql` (additive).
