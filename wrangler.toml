@@ -40,3 +40,7 @@ invocation_logs = true
 
 [triggers]
 crons = ["*/5 * * * *"]
+
+# Workers AI: Creative Bot / Master Bot text (SEA-LION) and Graphic Design images (FLUX / Lucid Origin).
+[ai]
+binding = "AI"

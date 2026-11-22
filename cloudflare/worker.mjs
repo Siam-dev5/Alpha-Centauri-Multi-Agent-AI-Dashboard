@@ -187,6 +187,230 @@ export async function runScheduledAutoLike(env) {
  }
  return out;
 }
+// ---- Cloud creative workflow: Master Bot -> Creative Bot -> Graphic Design -> แอดมินโซเชียล ----
+// Each advance call runs exactly one stage under a row lock, so the browser (or the cron fallback)
+// can drive the run step by step while the activity feed polls the timestamped events.
+const WF_TEXT_MODEL="@cf/aisingapore/gemma-sea-lion-v4-27b-it";
+const WF_IMAGE_SQUARE_MODEL="@cf/black-forest-labs/flux-1-schnell";
+const WF_IMAGE_WIDE_MODEL="@cf/leonardo/lucid-origin";
+const WF_LOCK_MS=180000;
+const WF_ASSETS=[
+ {kind:"cover",from:"creative_done",to:"graphic_cover",label:"ภาพปก",model:WF_IMAGE_SQUARE_MODEL,width:1024,height:1024,promptKey:"cover_prompt"},
+ {kind:"illustration",from:"graphic_cover",to:"graphic_illustration",label:"ภาพประกอบ",model:WF_IMAGE_SQUARE_MODEL,width:1024,height:1024,promptKey:"illustration_prompt"},
+ {kind:"banner",from:"graphic_illustration",to:"graphic_banner",label:"แบนเนอร์",model:WF_IMAGE_WIDE_MODEL,width:1536,height:640,promptKey:"banner_prompt"}
+];
+const WF_STAGE_AGENT={created:"master",planned:"creative",creative_done:"graphic",graphic_cover:"graphic",graphic_illustration:"graphic",graphic_banner:"social"};
+export function extractJsonObject(text) {
+ const s=String(text||"");
+ const fenced=s.match(/```(?:json)?\s*([\s\S]*?)```/i);
+ for(const c of [fenced?fenced[1]:null,s]) {
+  if(!c) continue;
+  const start=c.indexOf("{"),end=c.lastIndexOf("}");
+  if(start<0||end<=start) continue;
+  try { return JSON.parse(c.slice(start,end+1)); } catch {}
+ }
+ return null;
+}
+async function wfLlmJson(env,system,user,validate) {
+ let last="";
+ for(let attempt=0;attempt<2;attempt++) {
+  const r=await env.AI.run(WF_TEXT_MODEL,{messages:[{role:"system",content:system},{role:"user",content:attempt?user+"\n\nตอบเป็น JSON object เดียวที่ถูกต้องเท่านั้น ห้ามมีข้อความอื่น":user}],max_tokens:1600,response_format:{type:"json_object"}});
+  const content=r?.choices?.[0]?.message?.content??r?.response??"";
+  const obj=content&&typeof content==="object"?content:extractJsonObject(content);
+  last=typeof content==="string"?content:JSON.stringify(content);
+  if(obj&&validate(obj)) return obj;
+ }
+ throw new Error("AI output was not valid JSON: "+safeText(last,160));
+}
+async function wfImageBase64(result) {
+ if(result&&typeof result.image==="string") return result.image;
+ if(result instanceof ReadableStream||result instanceof ArrayBuffer||result instanceof Uint8Array) {
+  const bytes=new Uint8Array(result instanceof ReadableStream?await new Response(result).arrayBuffer():result);
+  let bin=""; for(let i=0;i<bytes.length;i+=0x8000) bin+=String.fromCharCode(...bytes.subarray(i,i+0x8000));
+  return btoa(bin);
+ }
+ throw new Error("Image model returned no image");
+}
+async function appSecretProof(env,token) {
+ if(!env.META_APP_SECRET) return null;
+ const key=await crypto.subtle.importKey("raw",new TextEncoder().encode(env.META_APP_SECRET),{name:"HMAC",hash:"SHA-256"},false,["sign"]);
+ const proof=await crypto.subtle.sign("HMAC",key,new TextEncoder().encode(token));
+ return Array.from(new Uint8Array(proof),b=>b.toString(16).padStart(2,"0")).join("");
+}
+async function wfEvent(env,runId,from,to,status,message,detail=null) {
+ const row=await env.DB.prepare("SELECT COALESCE(MAX(seq),0)+1 n FROM workflow_events WHERE run_id=?").bind(runId).first();
+ await env.DB.prepare("INSERT INTO workflow_events(id,run_id,seq,from_agent,to_agent,status,message,detail_json,created_at) VALUES(?,?,?,?,?,?,?,?,?)")
+  .bind(random(12),runId,row?.n||1,from,to,status,safeText(message,700),detail?JSON.stringify(detail).slice(0,6000):null,now()).run();
+}
+const wfImagePrompt=(p)=>safeText(p,900)+", professional social media visual, clean composition, high quality, no text, no letters, no words, no logos, no watermark";
+export async function wfCreateRun(env,user,command) {
+ const text=safeText(String(command||"").trim(),1000);
+ if(text.length<4) return {error:"Command is too short",status:422};
+ const {results:fb=[]}=await env.DB.prepare("SELECT id,account_name,external_account_id,scopes_json,page_tasks_json FROM social_accounts WHERE owner_user_id=? AND platform='facebook' AND status='connected' AND encrypted_access_token IS NOT NULL").bind(user.id).all();
+ const ready=fb.filter(a=>facebookPublishReadiness(JSON.parse(a.scopes_json||"[]"),JSON.parse(a.page_tasks_json||"[]")).ready);
+ const named=ready.filter(a=>text.toLowerCase().includes(String(a.account_name).toLowerCase()));
+ const target=named.length===1?named[0]:ready.length===1?ready[0]:null;
+ const id=random(12),stamp=now();
+ const blocked=!target?(ready.length?"พบ Facebook Page ที่พร้อมโพสต์หลายเพจ กรุณาระบุชื่อเพจในคำสั่ง: "+ready.map(a=>a.account_name).join(", "):"ยังไม่มี Facebook Page ที่เชื่อมต่อและพร้อมโพสต์"):null;
+ await env.DB.prepare("INSERT INTO workflow_runs(id,owner_user_id,command,status,stage,target_account_id,error_message,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)")
+  .bind(id,user.id,text,target?"running":"blocked","created",target?target.id:null,blocked,stamp,stamp).run();
+ await wfEvent(env,id,"user","master","RECEIVED","รับคำสั่งจากแชท: "+text);
+ if(target) await wfEvent(env,id,"master","master","TARGET","เพจปลายทาง: "+target.account_name+" (Page ID "+target.external_account_id+")",{page_id:target.external_account_id});
+ else await wfEvent(env,id,"master","user","BLOCKED",blocked);
+ await audit(env,user.id,"workflow_started","workflow",id,user.email,{command:text,target_account_id:target?.id||null,blocked:!!blocked});
+ return {id};
+}
+async function wfStep(env,run,actor) {
+ const plan=run.plan_json?JSON.parse(run.plan_json):null,creative=run.creative_json?JSON.parse(run.creative_json):null;
+ const account=await env.DB.prepare("SELECT id,owner_user_id,external_account_id,account_name,status,scopes_json,page_tasks_json,encrypted_access_token FROM social_accounts WHERE id=? AND owner_user_id=? AND platform='facebook'").bind(run.target_account_id,run.owner_user_id).first();
+ if(!account) throw new Error("Target Facebook Page is no longer connected");
+ if(run.stage==="created") {
+  await wfEvent(env,run.id,"master","master","WORKING","Master Bot กำลังวิเคราะห์คำสั่งและวางแผนมอบหมายงาน ("+WF_TEXT_MODEL+")");
+  const p=await wfLlmJson(env,
+   'คุณคือ Master Bot ผู้ประสานงานทีม AI ของเพจ Facebook "'+account.account_name+'" วิเคราะห์คำสั่งผู้ใช้แล้ววางแผนให้ Creative Bot (คิดคอนเซปต์ สคริปต์ และ prompt ภาพ), Graphic Design (สร้างภาพปก ภาพประกอบ และแบนเนอร์) และแอดมินโซเชียล (โพสต์ลงเพจ) ตอบเป็น JSON เท่านั้น: {"summary":"สรุปแผนภาษาไทย 1 ประโยค","topic":"หัวข้อโพสต์","audience":"กลุ่มเป้าหมาย","tone":"โทนการสื่อสาร","creative_brief":"คำสั่งถึง Creative Bot","graphic_brief":"แนวทางภาพถึง Graphic Design","social_brief":"แนวทางการโพสต์ถึงแอดมินโซเชียล"}',
+   "คำสั่งผู้ใช้: "+run.command,
+   o=>typeof o.creative_brief==="string"&&o.creative_brief.trim()&&typeof o.topic==="string");
+  await env.DB.prepare("UPDATE workflow_runs SET plan_json=?,stage='planned',updated_at=? WHERE id=?").bind(JSON.stringify(p),now(),run.id).run();
+  await wfEvent(env,run.id,"master","creative","HANDOFF","Master Bot มอบหมาย Creative Bot: "+safeText(p.creative_brief,400),{summary:p.summary,topic:p.topic,audience:p.audience,tone:p.tone});
+  return;
+ }
+ if(run.stage==="planned") {
+  await wfEvent(env,run.id,"creative","creative","WORKING","Creative Bot กำลังคิดคอนเซปต์ สคริปต์ แคปชัน และ prompt ภาพ 3 ชิ้น");
+  const c=await wfLlmJson(env,
+   'คุณคือ Creative Bot ของเพจ Facebook "'+account.account_name+'" (ชุมชนสายงาน HR สรรหาว่าจ้าง) สร้างคอนเทนต์ตาม brief ตอบเป็น JSON เท่านั้น: {"concept":"คอนเซปต์ภาษาไทย 1-2 ประโยค","script":"สคริปต์/โครงเรื่องโพสต์ภาษาไทย 3-5 ข้อ","caption":"แคปชันโพสต์ Facebook ภาษาไทย 4-8 บรรทัด อ่านง่าย ใช้อีโมจิพอประมาณ ปิดท้ายด้วยแฮชแท็ก 3-5 อัน","cover_prompt":"English prompt for a square cover image","illustration_prompt":"English prompt for a square supporting illustration","banner_prompt":"English prompt for a wide web banner"} กติกา: prompt ภาพต้องเป็นภาษาอังกฤษ บรรยายเฉพาะภาพ ห้ามมีตัวอักษรในภาพ; แคปชันห้ามแต่งตัวเลขสถิติ ห้ามอ้างชื่อบริษัทหรือบุคคลจริง และห้ามใส่ข้อมูลส่วนบุคคล',
+   "คำสั่งผู้ใช้: "+run.command+"\nแผนจาก Master Bot: "+JSON.stringify(plan),
+   o=>["concept","caption","cover_prompt","illustration_prompt","banner_prompt"].every(k=>typeof o[k]==="string"&&o[k].trim())&&o.caption.length>=20);
+  c.caption=safeText(String(c.caption).replace(/```/g,"").trim(),2200);
+  if(Array.isArray(c.script)) c.script=c.script.join("\n");
+  await env.DB.prepare("UPDATE workflow_runs SET creative_json=?,stage='creative_done',updated_at=? WHERE id=?").bind(JSON.stringify(c),now(),run.id).run();
+  await wfEvent(env,run.id,"creative","graphic","HANDOFF","Creative Bot ส่ง brief + prompt ภาพ 3 ชิ้นให้ Graphic Design · คอนเซปต์: "+safeText(c.concept,300),{concept:c.concept,script:safeText(c.script||"",1200),cover_prompt:c.cover_prompt,illustration_prompt:c.illustration_prompt,banner_prompt:c.banner_prompt});
+  return;
+ }
+ const assetStep=WF_ASSETS.find(a=>a.from===run.stage);
+ if(assetStep) {
+  const prompt=wfImagePrompt(creative[assetStep.promptKey]);
+  await wfEvent(env,run.id,"graphic","graphic","WORKING","Graphic Design กำลังสร้าง"+assetStep.label+" "+assetStep.width+"x"+assetStep.height+" ("+assetStep.model+")");
+  const input=assetStep.model===WF_IMAGE_WIDE_MODEL?{prompt,width:assetStep.width,height:assetStep.height,num_steps:20}:{prompt,steps:6};
+  const b64=await wfImageBase64(await env.AI.run(assetStep.model,input));
+  const bytes=Math.floor(b64.length*3/4);
+  await env.DB.prepare("INSERT OR IGNORE INTO workflow_assets(id,run_id,kind,prompt,model,mime,width,height,bytes,data_b64,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)")
+   .bind(random(12),run.id,assetStep.kind,prompt,assetStep.model,"image/jpeg",assetStep.width,assetStep.height,bytes,b64,now()).run();
+  await env.DB.prepare("UPDATE workflow_runs SET stage=?,updated_at=? WHERE id=?").bind(assetStep.to,now(),run.id).run();
+  await wfEvent(env,run.id,"graphic","graphic","DONE","สร้าง"+assetStep.label+"เสร็จ ("+assetStep.width+"x"+assetStep.height+", "+Math.round(bytes/1024)+" KB)",{kind:assetStep.kind});
+  if(assetStep.kind==="banner") await wfEvent(env,run.id,"graphic","social","HANDOFF","Graphic Design ส่งภาพปก ภาพประกอบ แบนเนอร์ และแคปชันให้แอดมินโซเชียล");
+  return;
+ }
+ if(run.stage==="graphic_banner") {
+  await wfEvent(env,run.id,"social","social","WORKING","แอดมินโซเชียลกำลังโพสต์ภาพ 3 ชิ้น + แคปชันลงเพจ "+account.account_name);
+  const readiness=facebookPublishReadiness(JSON.parse(account.scopes_json||"[]"),JSON.parse(account.page_tasks_json||"[]"));
+  if(account.status!=="connected"||!account.encrypted_access_token||!readiness.ready) throw new Error("Facebook Page is not authorized to publish: "+readiness.missing.join(", "));
+  let contentId=run.content_id;
+  if(!contentId) {
+   contentId=random(16);
+   const stamp=now();
+   await env.DB.prepare("INSERT INTO content_items(id,owner_user_id,title,body,affiliate_url,disclosure,platforms_json,account_ids_json,status,created_at,updated_at,approved_at,approved_by) VALUES(?,?,?,?,?,?,?,?,'approved',?,?,?,?)")
+    .bind(contentId,run.owner_user_id,safeText("Workflow: "+(creative.concept||plan?.topic||"Creative post"),240),creative.caption,null,"",JSON.stringify(["facebook"]),JSON.stringify([account.id]),stamp,stamp,stamp,safeText(actor,120)+" (user-authorized workflow)").run();
+   await env.DB.prepare("UPDATE workflow_runs SET content_id=?,updated_at=? WHERE id=?").bind(contentId,now(),run.id).run();
+   await audit(env,run.owner_user_id,"content_approve","content",contentId,actor,{reason:"User instructed this workflow to publish directly",workflow_run:run.id});
+  }
+  const existing=await env.DB.prepare("SELECT status,external_post_id,permalink FROM publish_records WHERE content_id=? AND account_id=?").bind(contentId,account.id).first();
+  if(existing) {
+   if(existing.status==="published") { await env.DB.prepare("UPDATE workflow_runs SET status='completed',stage='published',post_id=?,permalink=?,completed_at=?,updated_at=? WHERE id=?").bind(existing.external_post_id,existing.permalink,now(),now(),run.id).run(); return; }
+   throw new Error("A previous publish attempt is "+existing.status+"; not retried to avoid duplicate posts");
+  }
+  const recordId=random(16);
+  await env.DB.prepare("INSERT INTO publish_records(id,owner_user_id,content_id,account_id,platform,idempotency_key,status,created_at,updated_at) VALUES(?,?,?,?,?,?,'publishing',?,?)")
+   .bind(recordId,run.owner_user_id,contentId,account.id,"facebook","wf_"+run.id,now(),now()).run();
+  const failRecord=async(status,message)=>{ await env.DB.prepare("UPDATE publish_records SET status=?,error_message=?,updated_at=? WHERE id=?").bind(status,safeText(message,300),now(),recordId).run(); };
+  const token=await decrypt(account.encrypted_access_token,env),proof=await appSecretProof(env,token);
+  const page=encodeURIComponent(account.external_account_id),base="https://graph.facebook.com/"+graphVersion(env)+"/";
+  const {results:assets=[]}=await env.DB.prepare("SELECT id,kind,data_b64,fb_photo_id FROM workflow_assets WHERE run_id=? ORDER BY CASE kind WHEN 'cover' THEN 1 WHEN 'illustration' THEN 2 ELSE 3 END").bind(run.id).all();
+  if(assets.length!==3) { await failRecord("failed","Expected 3 generated images"); throw new Error("Expected 3 generated images, found "+assets.length); }
+  const mediaIds=[];
+  for(const asset of assets) {
+   let photoId=asset.fb_photo_id;
+   if(!photoId) {
+    const form=new FormData();
+    form.set("access_token",token); if(proof) form.set("appsecret_proof",proof);
+    form.set("published","false");
+    form.set("source",new Blob([Uint8Array.from(atob(asset.data_b64),c=>c.charCodeAt(0))],{type:"image/jpeg"}),asset.kind+".jpg");
+    let res,meta;
+    try { res=await fetch(base+page+"/photos",{method:"POST",body:form,headers:{Accept:"application/json"}}); meta=await res.json().catch(()=>({})); }
+    catch { await failRecord("failed","Network error while uploading "+asset.kind); throw new Error("Network error while uploading the "+asset.kind+" image; nothing was posted"); }
+    if(!res.ok||meta.error||!meta.id) { const m=safeText(meta.error?.message||"Photo upload failed",300); await failRecord("failed",m); throw new Error("Facebook rejected the "+asset.kind+" upload: "+m); }
+    photoId=String(meta.id);
+    await env.DB.prepare("UPDATE workflow_assets SET fb_photo_id=? WHERE id=?").bind(photoId,asset.id).run();
+   }
+   mediaIds.push(photoId);
+  }
+  await wfEvent(env,run.id,"social","social","UPLOADED","อัปโหลดภาพ 3 ชิ้นแบบยังไม่เผยแพร่แล้ว กำลังสร้างโพสต์",{media_fbids:mediaIds});
+  const feed=new FormData();
+  feed.set("access_token",token); if(proof) feed.set("appsecret_proof",proof);
+  feed.set("message",creative.caption); feed.set("published","true");
+  mediaIds.forEach((id,i)=>feed.set("attached_media["+i+"]",JSON.stringify({media_fbid:id})));
+  let res,meta;
+  try { res=await fetch(base+page+"/feed",{method:"POST",body:feed,headers:{Accept:"application/json"}}); meta=await res.json().catch(()=>({})); }
+  catch {
+   await failRecord("unknown","Network error after the post request; check the Page before retrying");
+   await audit(env,run.owner_user_id,"facebook_publish_unknown","content",contentId,actor,{account_id:account.id,workflow_run:run.id});
+   throw new Error("The connection ended before Facebook confirmed the post; it may exist. Not retried.");
+  }
+  if(!res.ok||meta.error||!meta.id) {
+   const m=safeText(meta.error?.message||"Facebook did not return a post ID",300);
+   await failRecord("failed",m);
+   await audit(env,run.owner_user_id,"facebook_publish_failed","content",contentId,actor,{account_id:account.id,workflow_run:run.id,error:m});
+   throw new Error("Facebook rejected the post: "+m);
+  }
+  const postId=String(meta.id);
+  let permalink=null;
+  try { permalink=(await graphGet(env,postId,{fields:"permalink_url",access_token:token})).permalink_url||null; } catch {}
+  const done=now();
+  await env.DB.prepare("UPDATE publish_records SET status='published',external_post_id=?,permalink=?,updated_at=? WHERE id=?").bind(postId,permalink,done,recordId).run();
+  await env.DB.prepare("UPDATE content_items SET status='published',updated_at=? WHERE id=?").bind(done,contentId).run();
+  await env.DB.prepare("UPDATE workflow_runs SET status='completed',stage='published',post_id=?,permalink=?,completed_at=?,updated_at=? WHERE id=?").bind(postId,permalink,done,done,run.id).run();
+  await audit(env,run.owner_user_id,"facebook_post_published","content",contentId,actor,{account_id:account.id,post_id:postId,permalink,post_kind:"multi_photo",workflow_run:run.id});
+  await wfEvent(env,run.id,"social","master","DONE","แอดมินโซเชียลโพสต์สำเร็จ · Post ID "+postId,{post_id:postId,permalink});
+  await wfEvent(env,run.id,"master","user","COMPLETED","Workflow เสร็จสมบูรณ์ · Facebook ยืนยันโพสต์แล้ว"+(permalink?" · "+permalink:""),{post_id:postId,permalink});
+  return;
+ }
+ throw new Error("Unknown workflow stage "+run.stage);
+}
+export async function wfAdvance(env,runId,ownerId,actor) {
+ const stamp=now(),lock=new Date(Date.now()+WF_LOCK_MS).toISOString();
+ const claim=await env.DB.prepare("UPDATE workflow_runs SET lock_until=?,updated_at=? WHERE id=? AND owner_user_id=? AND status='running' AND (lock_until IS NULL OR lock_until<?)").bind(lock,stamp,runId,ownerId,stamp).run();
+ if((claim.meta?.changes||0)!==1) return false;
+ const run=await env.DB.prepare("SELECT * FROM workflow_runs WHERE id=?").bind(runId).first();
+ try { await wfStep(env,run,actor); }
+ catch(error) {
+  const message=safeText(error?.message||"Workflow step failed",300);
+  await env.DB.prepare("UPDATE workflow_runs SET status='failed',error_message=?,completed_at=?,updated_at=? WHERE id=?").bind(message,now(),now(),runId).run();
+  await wfEvent(env,runId,WF_STAGE_AGENT[run.stage]||"master","master","FAILED",message);
+  await audit(env,ownerId,"workflow_failed","workflow",runId,actor,{stage:run.stage,error:message});
+ } finally {
+  await env.DB.prepare("UPDATE workflow_runs SET lock_until=NULL,updated_at=? WHERE id=?").bind(now(),runId).run();
+ }
+ return true;
+}
+export async function wfView(env,runId,ownerId,after=0) {
+ const run=await env.DB.prepare("SELECT r.id,r.command,r.status,r.stage,r.plan_json,r.creative_json,r.content_id,r.post_id,r.permalink,r.error_message,r.lock_until,r.created_at,r.updated_at,r.completed_at,a.account_name,a.external_account_id page_id FROM workflow_runs r LEFT JOIN social_accounts a ON a.id=r.target_account_id WHERE r.id=? AND r.owner_user_id=?").bind(runId,ownerId).first();
+ if(!run) return null;
+ const {results:events=[]}=await env.DB.prepare("SELECT seq,from_agent,to_agent,status,message,detail_json,created_at FROM workflow_events WHERE run_id=? AND seq>? ORDER BY seq").bind(runId,after).all();
+ const {results:assets=[]}=await env.DB.prepare("SELECT kind,prompt,model,width,height,bytes,fb_photo_id,created_at FROM workflow_assets WHERE run_id=? ORDER BY created_at").bind(runId).all();
+ const {plan_json,creative_json,...rest}=run;
+ return {run:{...rest,plan:plan_json?JSON.parse(plan_json):null,creative:creative_json?JSON.parse(creative_json):null},events:events.map(e=>({...e,detail:e.detail_json?JSON.parse(e.detail_json):null,detail_json:undefined})),assets};
+}
+export async function runScheduledWorkflows(env) {
+ const stamp=now(),stale=new Date(Date.now()-60000).toISOString();
+ const {results=[]}=await env.DB.prepare("SELECT id,owner_user_id FROM workflow_runs WHERE status='running' AND (lock_until IS NULL OR lock_until<?) AND updated_at<? ORDER BY created_at LIMIT 3").bind(stamp,stale).all();
+ for(const r of results) {
+  for(let i=0;i<7;i++) {
+   if(!await wfAdvance(env,r.id,r.owner_user_id,"workflow_cron")) break;
+   const s=await env.DB.prepare("SELECT status FROM workflow_runs WHERE id=?").bind(r.id).first();
+   if(s?.status!=="running") break;
+  }
+ }
+ return results.length;
+}
 async function graphGet(env,path,params={}) {
  const url=new URL("https://graph.facebook.com/"+graphVersion(env)+"/"+path.replace(/^\/+/, ""));
  const query={...params};
@@ -397,6 +621,33 @@ async function handle(request,env) {
   await audit(env,user.id,"account_disconnected","account",a.id,user.email,{platform:a.platform});
   return json({id:a.id,status:"disconnected"},200,cors(request));
  }
+ if(method==="POST"&&path==="/workflows") {
+  if(!env.AI) return json({error:"Workers AI binding is not configured"},503,cors(request));
+  const b=await request.json().catch(()=>({}));
+  const created=await wfCreateRun(env,user,b.command);
+  if(created.error) return json({error:created.error},created.status,cors(request));
+  return json(await wfView(env,created.id,user.id),201,cors(request));
+ }
+ if(method==="GET"&&path==="/workflows") {
+  const {results=[]}=await env.DB.prepare("SELECT id,command,status,stage,post_id,permalink,error_message,created_at,completed_at FROM workflow_runs WHERE owner_user_id=? ORDER BY created_at DESC LIMIT 10").bind(user.id).all();
+  return json({runs:results},200,cors(request));
+ }
+ const wfMatch=path.match(/^\/workflows\/([a-zA-Z0-9_-]+)(?:\/(advance|assets\/(cover|illustration|banner)))?$/);
+ if(wfMatch&&method==="GET"&&!wfMatch[2]) {
+  const view=await wfView(env,wfMatch[1],user.id,Math.max(0,parseInt(url.searchParams.get("after")||"0",10)||0));
+  return view?json(view,200,cors(request)):json({error:"Workflow not found"},404,cors(request));
+ }
+ if(wfMatch&&method==="POST"&&wfMatch[2]==="advance") {
+  const after=Math.max(0,parseInt(url.searchParams.get("after")||"0",10)||0);
+  if(!await wfView(env,wfMatch[1],user.id,0)) return json({error:"Workflow not found"},404,cors(request));
+  const advanced=await wfAdvance(env,wfMatch[1],user.id,user.email);
+  return json({advanced,...await wfView(env,wfMatch[1],user.id,after)},200,cors(request));
+ }
+ if(wfMatch&&method==="GET"&&wfMatch[3]) {
+  const asset=await env.DB.prepare("SELECT s.data_b64,s.mime FROM workflow_assets s JOIN workflow_runs r ON r.id=s.run_id WHERE s.run_id=? AND s.kind=? AND r.owner_user_id=?").bind(wfMatch[1],wfMatch[3],user.id).first();
+  if(!asset) return json({error:"Asset not found"},404,cors(request));
+  return new Response(Uint8Array.from(atob(asset.data_b64),c=>c.charCodeAt(0)),{status:200,headers:{"Content-Type":asset.mime,"Cache-Control":"private, max-age=3600","X-Content-Type-Options":"nosniff",...cors(request)}});
+ }
  if(method==="GET"&&path==="/automation/auto-like") {
   const {results:accounts=[]}=await env.DB.prepare("SELECT a.id,a.account_name,a.external_account_id,a.status,a.scopes_json,a.page_tasks_json,s.enabled,s.enabled_at,s.backfill_count,s.last_run_at,s.last_run_result FROM social_accounts a LEFT JOIN auto_like_settings s ON s.account_id=a.id WHERE a.owner_user_id=? AND a.platform='facebook' ORDER BY a.account_name").bind(user.id).all();
   const {results:likes=[]}=await env.DB.prepare("SELECT l.post_id,l.post_permalink,l.post_message_preview,l.post_created_time,l.source,l.status,l.error_message,l.liked_at,l.created_at,a.account_name FROM page_post_likes l JOIN social_accounts a ON a.id=l.account_id WHERE l.owner_user_id=? ORDER BY l.created_at DESC LIMIT 30").bind(user.id).all();
@@ -567,4 +818,6 @@ export default { async fetch(request,env) {
 // Cron trigger (wrangler.toml [triggers]): runs the "แอดมินโซเชียล" auto-like for enabled Pages.
 async scheduled(event,env,ctx) {
  ctx.waitUntil(runScheduledAutoLike(env).then(r=>console.log("auto-like-cron",{accounts:r.length,results:r.map(x=>({liked:x.liked,failed:x.failed,queued:x.queued,error:x.error||null}))})).catch(e=>console.error("auto-like-cron",{message:safeText(e?.message||"unknown",200)})));
+ // Resume creative workflows whose browser driver went away (stale, unlocked, still running).
+ if(env.AI) ctx.waitUntil(runScheduledWorkflows(env).then(n=>n&&console.log("workflow-cron",{resumed:n})).catch(e=>console.error("workflow-cron",{message:safeText(e?.message||"unknown",200)})));
 }};
