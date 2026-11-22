@@ -72,6 +72,10 @@ export function facebookPublishReadiness(scopes=[],tasks=[]) {
  if(!(assigned.has("CREATE_CONTENT")||assigned.has("MANAGE"))) missing.push("Page task CREATE_CONTENT");
  return {ready:missing.length===0,missing};
 }
+// Text posts use the Page feed edge; photo posts use the Page photos edge.
+export function facebookPublishUrl(env,pageId,kind="text") {
+ return "https://graph.facebook.com/"+graphVersion(env)+"/"+encodeURIComponent(pageId)+"/"+(kind==="photo"?"photos":"feed");
+}
 export async function verifyMetaSignature(rawBody,signature,appSecret) {
  if(!rawBody||!signature||!appSecret||!/^sha256=[a-f0-9]{64}$/i.test(signature)) return false;
  const key=await crypto.subtle.importKey("raw",new TextEncoder().encode(appSecret),{name:"HMAC",hash:"SHA-256"},false,["sign"]);
@@ -253,7 +257,7 @@ async function handle(request,env) {
   const users=await env.DB.prepare("SELECT COUNT(*) n FROM app_users").first();
   const {results:facebookAccounts=[]}=await env.DB.prepare("SELECT scopes_json,page_tasks_json FROM social_accounts WHERE platform='facebook' AND status='connected'").all();
   const publishReadyAccounts=facebookAccounts.filter(a=>facebookPublishReadiness(JSON.parse(a.scopes_json||"[]"),JSON.parse(a.page_tasks_json||"[]")).ready).length;
-  return json({service:"Alpha Centauri Social Commerce Cloud API",status:"online",mode:"cloud",setup_ready:setup,admin_initialized:(users?.n||0)>0,publishing_enabled:publishReadyAccounts>0,publishing_adapter_enabled:true,publishing_adapter:"facebook_page_photo",publish_ready_accounts:publishReadyAccounts,meta_oauth_configured:metaAnyConfigured(env),meta_instagram_configured:metaConfigured(env,"instagram"),meta_facebook_configured:metaConfigured(env,"facebook"),meta_webhook_configured:webhookConfigured(env),meta_redirect_uri:env.META_REDIRECT_URI||null,platforms:Object.fromEntries(PLATFORMS.map(p=>[p,p==="instagram"?(metaConfigured(env,"instagram")?"oauth_ready":"oauth_not_configured"):p==="facebook"?(metaConfigured(env,"facebook")?"oauth_ready":"oauth_not_configured"):"oauth_not_configured"]))},200,cors(request));
+  return json({service:"Alpha Centauri Social Commerce Cloud API",status:"online",mode:"cloud",setup_ready:setup,admin_initialized:(users?.n||0)>0,publishing_enabled:publishReadyAccounts>0,publishing_adapter_enabled:true,publishing_adapter:"facebook_page_photo",publishing_formats:["text","photo"],publish_ready_accounts:publishReadyAccounts,meta_oauth_configured:metaAnyConfigured(env),meta_instagram_configured:metaConfigured(env,"instagram"),meta_facebook_configured:metaConfigured(env,"facebook"),meta_webhook_configured:webhookConfigured(env),meta_redirect_uri:env.META_REDIRECT_URI||null,platforms:Object.fromEntries(PLATFORMS.map(p=>[p,p==="instagram"?(metaConfigured(env,"instagram")?"oauth_ready":"oauth_not_configured"):p==="facebook"?(metaConfigured(env,"facebook")?"oauth_ready":"oauth_not_configured"):"oauth_not_configured"]))},200,cors(request));
  }
  if(method==="POST"&&path==="/auth/bootstrap") {
   if(!env.BOOTSTRAP_KEY||(request.headers.get("Authorization")||"").replace(/^Bootstrap\s+/i,"")!==env.BOOTSTRAP_KEY) return json({error:"Invalid bootstrap key"},403,cors(request));
@@ -343,10 +347,15 @@ async function handle(request,env) {
   if(!account||account.status!=="connected"||!account.encrypted_access_token) return json({error:"Facebook Page is not connected"},409,cors(request));
   const readiness=facebookPublishReadiness(JSON.parse(account.scopes_json||"[]"),JSON.parse(account.page_tasks_json||"[]"));
   if(!readiness.ready) return json({error:"Facebook Page is not authorized to publish. Reconnect it and grant the required access.",missing_permissions:readiness.missing},403,cors(request));
-  const form=await request.formData(),image=form.get("image");
-  if(!image||typeof image.arrayBuffer!=="function") return json({error:"Choose a JPEG or PNG image before publishing"},422,cors(request));
-  if(!["image/jpeg","image/png"].includes(image.type)) return json({error:"Only JPEG and PNG images are supported"},415,cors(request));
-  if(image.size<1||image.size>8*1024*1024) return json({error:"Image must be smaller than 8 MB"},413,cors(request));
+  // Photo post when a JPEG/PNG is attached (multipart "image"); otherwise a text-only Page feed post.
+  const contentType=(request.headers.get("Content-Type")||"").toLowerCase();
+  const form=contentType.startsWith("multipart/form-data")?await request.formData():null;
+  const rawImage=form?form.get("image"):null;
+  const image=rawImage&&typeof rawImage.arrayBuffer==="function"&&rawImage.size>0?rawImage:null;
+  if(image&&!["image/jpeg","image/png"].includes(image.type)) return json({error:"Only JPEG and PNG images are supported"},415,cors(request));
+  if(image&&image.size>8*1024*1024) return json({error:"Image must be smaller than 8 MB"},413,cors(request));
+  const postKind=image?"photo":"text";
+  if(!String(item.body||"").trim()) return json({error:"Post text is empty"},422,cors(request));
   const idempotencyKey=safeText(request.headers.get("Idempotency-Key")||"",128);
   if(!/^[A-Za-z0-9_-]{16,128}$/.test(idempotencyKey)) return json({error:"A valid Idempotency-Key is required"},422,cors(request));
   const existing=await env.DB.prepare("SELECT status,external_post_id,permalink,error_message FROM publish_records WHERE content_id=? AND account_id=?").bind(contentId,accountId).first();
@@ -367,10 +376,10 @@ async function handle(request,env) {
   }
   body.set("message",item.body);
   body.set("published","true");
-  body.set("source",image,image.name||"upload.jpg");
+  if(image) body.set("source",image,image.name||"upload.jpg");
   let response,meta;
   try {
-   response=await fetch("https://graph.facebook.com/"+graphVersion(env)+"/"+encodeURIComponent(account.external_account_id)+"/photos",{method:"POST",body,headers:{Accept:"application/json"}});
+   response=await fetch(facebookPublishUrl(env,account.external_account_id,postKind),{method:"POST",body,headers:{Accept:"application/json"}});
    meta=await response.json().catch(()=>({}));
   } catch(error) {
    await env.DB.prepare("UPDATE publish_records SET status='unknown',error_message=?,updated_at=? WHERE id=?")
@@ -379,7 +388,7 @@ async function handle(request,env) {
    return json({error:"The connection ended before Facebook confirmed the result. The post may have been created; check the Page before retrying.",publish_status:"unknown"},502,cors(request));
   }
   if(!response.ok||meta.error||!meta.id) {
-   const message=safeText(meta.error?.message||"Facebook did not return a photo ID",300);
+   const message=safeText(meta.error?.message||"Facebook did not return a post ID",300);
    await env.DB.prepare("UPDATE publish_records SET status='failed',error_message=?,updated_at=? WHERE id=?").bind(message,now(),recordId).run();
    await audit(env,user.id,"facebook_publish_failed","content",contentId,user.email,{account_id:accountId,error:message});
    return json({error:"Facebook rejected the publish request: "+message,publish_status:"failed"},502,cors(request));
@@ -394,8 +403,8 @@ async function handle(request,env) {
    .bind(String(postId),permalink,now(),recordId).run();
   const counts=await env.DB.prepare("SELECT COUNT(*) total,SUM(CASE WHEN status='published' THEN 1 ELSE 0 END) published FROM publish_records WHERE content_id=?").bind(contentId).first();
   if((counts?.published||0)>=targetIds.length) await env.DB.prepare("UPDATE content_items SET status='published',updated_at=? WHERE id=? AND owner_user_id=?").bind(now(),contentId,user.id).run();
-  await audit(env,user.id,"facebook_post_published","content",contentId,user.email,{account_id:accountId,post_id:String(postId),permalink});
-  return json({status:"published",platform:"facebook",account_name:account.account_name,post_id:String(postId),permalink},201,cors(request));
+  await audit(env,user.id,"facebook_post_published","content",contentId,user.email,{account_id:accountId,post_id:String(postId),permalink,post_kind:postKind});
+  return json({status:"published",platform:"facebook",post_kind:postKind,account_name:account.account_name,post_id:String(postId),permalink},201,cors(request));
  }
  const submit=path.match(/^\/content\/([a-zA-Z0-9_-]+)\/submit$/);
  if(method==="POST"&&submit) {
