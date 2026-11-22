@@ -1738,6 +1738,7 @@
             { from: 'creative', to: 'graphic' },
             { from: 'graphic', to: 'video' },
             { from: 'video', to: 'social' },
+            { from: 'graphic', to: 'social' },
             { from: 'social', to: 'master' }
         ];
 
@@ -2272,8 +2273,8 @@
         // ==========================================
         // 4. LOGS & TASK QUEUE MANAGEMENT
         // ==========================================
-        function addActivityLog(fromName, toName, message, dept, taskId) {
-            const now = new Date();
+        function addActivityLog(fromName, toName, message, dept, taskId, atIso) {
+            const now = atIso && !isNaN(new Date(atIso)) ? new Date(atIso) : new Date();
             const timeStr = now.toTimeString().split(' ')[0];
             logs.unshift({ time: timeStr, from: fromName, to: toName, message, dept, taskId });
             
@@ -2636,6 +2637,138 @@
             }
         }
 
+        // ==========================================
+        // CLOUD CREATIVE WORKFLOW (real): Master Bot -> Creative Bot -> Graphic Design -> แอดมินโซเชียล
+        // The Cloud Worker runs each stage; the browser drives /advance and polls timestamped events.
+        // ==========================================
+        const WF_AGENT_NAMES = {user:'ผู้ใช้งาน (Admin)', master:'Master Bot', creative:'Creative Bot', graphic:'Graphic Design', social:'แอดมินโซเชียล'};
+        const WF_PATH = [['user','openbot'],['openbot','master'],['master','creative'],['creative','graphic'],['graphic','social'],['social','master']];
+        let wfActiveRunId = null;
+        function isCreativeWorkflowIntent(text) {
+            const value = String(text || '');
+            if (/ไม่ต้อง|อย่า|ห้าม|ยกเลิก/.test(value)) return false;
+            return /(creative|ครีเอทีฟ|คอนเซปต์|กราฟิก|graphic|ภาพปก|แบนเนอร์|banner|ภาพประกอบ|คอนเทนต์|content|workflow)/i.test(value)
+                && /(โพส|post|publish|เพจ|facebook|เฟซบุ๊ก)/i.test(value);
+        }
+        function wfTime(iso) { const d = new Date(iso); return isNaN(d) ? '' : d.toTimeString().split(' ')[0]; }
+        function wfClearPath() { WF_PATH.forEach(([a, b]) => setConnection(a, b, false)); }
+        function applyWorkflowEvent(e, taskId) {
+            const from = e.from_agent, to = e.to_agent;
+            const label = '[LIVE ' + e.status + '] ' + e.message;
+            addActivityLog(WF_AGENT_NAMES[from] || from, WF_AGENT_NAMES[to] || to, label, 'MEDIA', taskId, e.created_at);
+            const owner = WF_AGENT_NAMES[to] || WF_AGENT_NAMES[from];
+            const progress = {RECEIVED:5, TARGET:8, HANDOFF:{creative:25, graphic:45, social:85}[to] || 30, DONE: from === 'graphic' ? 55 : 95, UPLOADED:92, COMPLETED:100}[e.status];
+            if (progress) updateTaskProgress(taskId, owner, progress);
+            if (e.status === 'RECEIVED') { setConnection('user', 'openbot', true); setConnection('openbot', 'master', true); updateAgentState('user', 'TALKING', taskId, 'ส่งคำสั่งให้ Master Bot'); updateAgentState('master', 'WORKING', taskId, 'รับคำสั่ง'); }
+            if (e.status === 'WORKING') updateAgentState(from, 'WORKING', taskId, e.message);
+            if (e.status === 'HANDOFF') {
+                setConnection(from, to, true);
+                updateAgentState(from, 'IDLE', '-', 'ส่งต่องานแล้ว');
+                updateAgentState(to, 'TALKING', taskId, e.message);
+                appendChatBubble('bot', '➡️ ' + (WF_AGENT_NAMES[from] || from) + ' → ' + (WF_AGENT_NAMES[to] || to) + ' (' + wfTime(e.created_at) + ')\n' + e.message);
+            }
+            if (e.status === 'DONE' && from === 'social') { setConnection('social', 'master', true); updateAgentState('social', 'IDLE', '-', e.message); }
+            if (e.status === 'COMPLETED') { updateAgentState('master', 'IDLE', 'TSK-CORE-01', e.message); updateAgentState('user', 'IDLE', '-'); }
+            if (e.status === 'FAILED' || e.status === 'BLOCKED') { updateAgentState(from, 'BLOCKED', taskId, e.message); appendChatBubble('bot', '⛔ ' + (WF_AGENT_NAMES[from] || from) + ': ' + e.message); }
+        }
+        async function wfLoadImage(runId, kind) {
+            const response = await fetch(SC_API + '/workflows/' + encodeURIComponent(runId) + '/assets/' + kind, {headers:{'Authorization':'Bearer ' + sessionStorage.getItem('sc_session')}});
+            if (!response.ok) throw new Error('image ' + kind + ' ' + response.status);
+            return URL.createObjectURL(await response.blob());
+        }
+        async function appendWorkflowResultCard(view, allEvents) {
+            const run = view.run, creative = run.creative || {};
+            const feed = document.getElementById('chat-feed');
+            const card = document.createElement('section');
+            card.dataset.workflowResult = run.id;
+            card.className = 'ml-9 max-w-[92%] rounded-xl border p-3 space-y-2 ' + (run.status === 'completed' ? 'border-emerald-400/40 bg-emerald-500/10' : 'border-rose-400/40 bg-rose-500/10');
+            const add = (tag, cls, text) => { const el = document.createElement(tag); el.className = cls; el.textContent = text; card.appendChild(el); return el; };
+            add('p', 'text-xs font-semibold ' + (run.status === 'completed' ? 'text-emerald-200' : 'text-rose-200'), run.status === 'completed' ? '✅ Workflow สำเร็จ · โพสต์ลงเพจแล้ว' : '⛔ Workflow ' + run.status + ': ' + (run.error_message || ''));
+            add('p', 'text-[11px] text-slate-300', 'เพจ: ' + (run.account_name || '-') + ' (ID ' + (run.page_id || '-') + ') · Run ' + run.id);
+            if (creative.concept) add('p', 'text-[11px] text-slate-200', 'คอนเซปต์: ' + creative.concept);
+            if (view.assets && view.assets.length) {
+                const grid = document.createElement('div');
+                grid.className = 'grid grid-cols-3 gap-1.5';
+                for (const asset of view.assets) {
+                    const fig = document.createElement('figure');
+                    const img = document.createElement('img');
+                    img.alt = asset.kind;
+                    img.className = 'h-20 w-full rounded-md border border-slate-600 object-cover';
+                    wfLoadImage(run.id, asset.kind).then(src => { img.src = src; }).catch(() => {});
+                    const cap = document.createElement('figcaption');
+                    cap.className = 'text-[9px] text-slate-400';
+                    cap.textContent = ({cover:'ภาพปก', illustration:'ภาพประกอบ', banner:'แบนเนอร์'}[asset.kind] || asset.kind) + ' ' + asset.width + 'x' + asset.height;
+                    fig.append(img, cap);
+                    grid.appendChild(fig);
+                }
+                card.appendChild(grid);
+            }
+            if (creative.caption) add('p', 'text-xs text-white whitespace-pre-wrap break-words rounded-lg bg-slate-950/60 p-2', creative.caption);
+            if (run.post_id) add('p', 'text-[11px] text-emerald-200', 'Post ID: ' + run.post_id);
+            if (run.permalink) { const a = document.createElement('a'); a.href = run.permalink; a.target = '_blank'; a.rel = 'noopener noreferrer'; a.className = 'block text-[11px] text-cyan-300 underline'; a.textContent = 'เปิดโพสต์ Facebook'; card.appendChild(a); }
+            const timeline = document.createElement('details');
+            timeline.open = true;
+            timeline.className = 'text-[10px] text-slate-300';
+            const summary = document.createElement('summary');
+            summary.textContent = 'Timeline handoff (' + allEvents.length + ' เหตุการณ์ · เวลาจาก server)';
+            timeline.appendChild(summary);
+            allEvents.filter(e => ['RECEIVED','HANDOFF','DONE','COMPLETED','FAILED','BLOCKED','UPLOADED'].includes(e.status)).forEach(e => {
+                const row = document.createElement('div');
+                row.textContent = wfTime(e.created_at) + ' · ' + (WF_AGENT_NAMES[e.from_agent] || e.from_agent) + ' → ' + (WF_AGENT_NAMES[e.to_agent] || e.to_agent) + ' · ' + e.status;
+                timeline.appendChild(row);
+            });
+            card.appendChild(timeline);
+            feed.appendChild(card);
+            feed.scrollTop = feed.scrollHeight;
+        }
+        async function runCloudCreativeWorkflow(command) {
+            if (!sessionStorage.getItem('sc_session')) {
+                appendChatBubble('bot', 'Workflow ทีม Media ต้องเข้าสู่ระบบ Social & Commerce ก่อน กรุณาเปิด Social & Affiliate แล้วเข้าสู่ระบบ จากนั้นส่งคำสั่งอีกครั้ง');
+                return;
+            }
+            if (wfActiveRunId) { appendChatBubble('bot', 'มี Workflow กำลังทำงานอยู่ (' + wfActiveRunId + ') กรุณารอให้เสร็จก่อน'); return; }
+            wfClearPath();
+            let view;
+            try { view = await scRequest('/workflows', {method:'POST', body:JSON.stringify({command})}); }
+            catch (error) { appendChatBubble('bot', 'เริ่ม Workflow ไม่สำเร็จ: ' + error.message); return; }
+            const run = view.run, taskId = 'WF-' + run.id.slice(0, 6).toUpperCase();
+            wfActiveRunId = run.id;
+            const seen = new Map();
+            const apply = (events) => (events || []).forEach(e => { if (!seen.has(e.seq)) { seen.set(e.seq, e); applyWorkflowEvent(e, taskId); } });
+            const lastSeq = () => seen.size ? Math.max(...seen.keys()) : 0;
+            activeTasks.unshift({ id: taskId, title: 'Workflow จริง: Creative → Graphic → โพสต์เพจ', owner: 'Master Bot', progress: 3 });
+            renderActiveTasks(); updateStatsUI();
+            appendChatBubble('bot', 'รับคำสั่งแล้ว · เริ่ม Workflow จริงบน Cloud (' + taskId + ')\nMaster Bot → Creative Bot → Graphic Design → แอดมินโซเชียล → เพจ "' + (run.account_name || '-') + '"');
+            apply(view.events);
+            let current = view;
+            const poller = setInterval(async () => {
+                try { const v = await scRequest('/workflows/' + encodeURIComponent(run.id) + '?after=' + lastSeq()); apply(v.events); current = {...current, run: v.run, assets: v.assets}; } catch {}
+            }, 1500);
+            try {
+                for (let i = 0; i < 24 && current.run.status === 'running'; i++) {
+                    const v = await scRequest('/workflows/' + encodeURIComponent(run.id) + '/advance?after=' + lastSeq(), {method:'POST'});
+                    apply(v.events);
+                    current = v;
+                    if (!v.advanced && v.run.status === 'running') await new Promise(r => setTimeout(r, 3000));
+                }
+            } catch (error) {
+                appendChatBubble('bot', 'การเชื่อมต่อขาดระหว่าง Workflow: ' + error.message + '\nงานจะทำต่อบน Cloud อัตโนมัติ (cron) และไม่โพสต์ซ้ำ');
+            } finally {
+                clearInterval(poller);
+            }
+            const final = await scRequest('/workflows/' + encodeURIComponent(run.id)).catch(() => current);
+            apply(final.events);
+            wfActiveRunId = null;
+            if (final.run.status === 'completed') {
+                WF_PATH.forEach(([a, b]) => setConnection(a, b, true));
+                completeTask(taskId);
+                showToast('Workflow สำเร็จ', 'โพสต์ลงเพจแล้ว · ' + (final.run.post_id || ''));
+            } else {
+                activeTasks = activeTasks.filter(t => t.id !== taskId); renderActiveTasks(); updateStatsUI();
+            }
+            await appendWorkflowResultCard(final, [...seen.values()].sort((a, b) => a.seq - b.seq));
+        }
+
         function handleUserSubmit(e) {
             e.preventDefault();
             const input = document.getElementById('command-input');
@@ -2652,6 +2785,11 @@
 
             // Route explicit Facebook publish commands to the authenticated Social API in either UI mode.
             // The chat creates a draft only; a separate approval card is required before public publishing.
+            // Real multi-bot workflow (Cloud): Master -> Creative -> Graphic -> แอดมินโซเชียล -> Facebook Page.
+            if (!currentImg && isCreativeWorkflowIntent(text)) {
+                runCloudCreativeWorkflow(text);
+                return;
+            }
             if (isFacebookPublishIntent(text)) {
                 handleFacebookPublishChatCommand(text, currentImg, imgName);
                 return;

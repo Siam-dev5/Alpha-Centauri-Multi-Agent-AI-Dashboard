@@ -58,3 +58,15 @@ test("chat no longer requires an image for Facebook commands", () => {
   assert.ok(approve.includes("post_kind:'text'"));
   assert.ok(approve.includes("confirm("));
 });
+
+test("creative workflow intent is separate from the single-post command", () => {
+  const ctx2 = vm.createContext({});
+  vm.runInContext(extract("isCreativeWorkflowIntent"), ctx2);
+  const { isCreativeWorkflowIntent } = ctx2;
+  assert.equal(isCreativeWorkflowIntent("ให้ Creative Bot คิดคอนเซปต์ แล้วให้ Graphic Design ทำภาพปกกับแบนเนอร์ จากนั้นโพสต์ลงเพจ"), true);
+  assert.equal(isCreativeWorkflowIntent("ทำคอนเทนต์เคล็ดลับสัมภาษณ์งานแล้วโพสต์ Facebook"), true);
+  for (const c of COMMANDS) assert.equal(isCreativeWorkflowIntent(c), false, c);
+  assert.equal(isCreativeWorkflowIntent("อย่าโพสต์คอนเทนต์ลงเพจ"), false);
+  const submit = html.slice(html.indexOf("function handleUserSubmit"), html.indexOf("LIVE API EXECUTION ENGINE"));
+  assert.ok(submit.indexOf("isCreativeWorkflowIntent(text)") < submit.indexOf("isFacebookPublishIntent(text)"));
+});
