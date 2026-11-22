@@ -31,6 +31,8 @@ jobs:
         with:
           node-version: '22'
       - name: Test Meta Worker and dashboard JavaScript
-        run: node --test tests/meta_worker.test.mjs tests/index_inline_scripts.test.mjs
+        run: node --test tests/meta_worker.test.mjs tests/index_inline_scripts.test.mjs tests/dashboard_route.test.mjs
+      - name: Build Worker Dashboard assets
+        run: node scripts/build-dashboard-assets.mjs && test -f dist/dashboard/index.html
       - name: Check Cloudflare Worker syntax
         run: node --check cloudflare/worker.mjs

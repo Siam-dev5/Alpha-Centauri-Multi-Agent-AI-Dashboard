@@ -49,7 +49,12 @@ Provider API credentials are request-scoped or loaded from the local .env; they 
 The static Dashboard is published at:
 https://siam-dev5.github.io/Alpha-Centauri-Multi-Agent-AI-Dashboard/
 
-The Local Gateway must be running on the user's computer for Social & Commerce and live multi-agent API functions. GitHub Pages does not host the local FastAPI service.
+The same Dashboard is also served by the Cloudflare Worker at:
+https://social-api.siamhrbp.com/
+
+Only a browser navigation to `/` (an `Accept: text/html` request) receives the Dashboard page. API clients and monitors that call `/` without asking for HTML still receive the JSON health status, and `/health` plus every `/api/social-commerce/*` route are unchanged. The Worker uses Workers Static Assets with `run_worker_first`, so the API router always decides first. `scripts/build-dashboard-assets.mjs` copies only `index.html` into `dist/dashboard` before `wrangler deploy`.
+
+The Local Gateway must be running on the user's computer for live multi-agent API functions. Neither GitHub Pages nor the Cloudflare Worker hosts the local FastAPI service. When using the Dashboard from `https://social-api.siamhrbp.com`, include that origin in the Gateway's `ALLOWED_ORIGINS`.
 
 ## Security and limitations
 
