@@ -854,6 +854,7 @@
           <button class="sc-tab rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-300" onclick="switchSocialTab('content')">Content &amp; Approval</button>
           <button class="sc-tab rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-300" onclick="switchSocialTab('access')">การตั้งค่า API</button>
           <button class="sc-tab rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-300" onclick="switchSocialTab('autolike')">แอดมินโซเชียล · Auto-Like</button>
+          <button class="sc-tab rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-300" onclick="switchSocialTab('shop')">ร้านค้า Shopee</button>
           <span id="sc-gateway-state" class="ml-auto self-center text-xs text-amber-300">กำลังตรวจสอบ Cloud API…</span>
         </div>
         <div id="sc-panel" class="min-h-[360px] overflow-y-auto p-4"></div>
@@ -876,11 +877,12 @@
         let scActiveTab = 'accounts';
         window.addEventListener('message', event => {
             if (event.origin !== 'https://social-api.siamhrbp.com') return;
-            const label = event.data?.type === 'ALPHA_CENTAURI_META_OAUTH' ? 'Meta' : event.data?.type === 'ALPHA_CENTAURI_TIKTOK_OAUTH' ? 'TikTok' : null;
+            const label = event.data?.type === 'ALPHA_CENTAURI_META_OAUTH' ? 'Meta' : event.data?.type === 'ALPHA_CENTAURI_TIKTOK_OAUTH' ? 'TikTok' : event.data?.type === 'ALPHA_CENTAURI_SHOPEE_SELLER_OAUTH' ? 'ร้านค้า Shopee' : null;
             if (!label) return;
             if (event.data.status === 'connected') {
                 alert('เชื่อมต่อ ' + label + ' สำเร็จ: ' + (event.data.message || 'บัญชีได้รับการบันทึกแล้ว'));
                 if (scActiveTab === 'accounts' && sessionStorage.getItem('sc_session')) renderSocialAccounts();
+                if (scActiveTab === 'shop' && sessionStorage.getItem('sc_session')) renderShopeeSeller();
             } else {
                 alert(event.data.message || 'เชื่อมต่อ ' + label + ' ไม่สำเร็จ กรุณาตรวจสอบการตั้งค่าและ Worker logs');
             }
@@ -987,7 +989,7 @@
         function switchSocialTab(tab) {
             scActiveTab = tab;
             document.querySelectorAll('.sc-tab').forEach((button, index) => {
-                const active = ['accounts','content','access','autolike'][index] === tab;
+                const active = ['accounts','content','access','autolike','shop'][index] === tab;
                 button.className = 'sc-tab rounded-lg border px-3 py-2 text-xs ' +
                     (active ? 'border-fuchsia-400/40 bg-fuchsia-500/15 text-fuchsia-200' : 'border-slate-700 text-slate-300');
             });
@@ -996,6 +998,56 @@
             if (tab === 'content') renderSocialContent();
             if (tab === 'access') renderSocialAccess();
             if (tab === 'autolike') renderAutoLike();
+            if (tab === 'shop') renderShopeeSeller();
+        }
+        // Shopee Seller (ร้านค้าของผู้ใช้) module: read-only shop connection, separate from Shopee Affiliate.
+        async function renderShopeeSeller() {
+            const panel = document.getElementById('sc-panel');
+            panel.innerHTML = '<p class="text-sm text-slate-400">กำลังโหลดร้านค้า…</p>';
+            try {
+                const data = await scRequest('/shopee-seller/shops');
+                const ready = data.configured && data.schema_ready;
+                const shops = data.shops || [];
+                const steps = [
+                    ['แอป Shopee Open Platform (Partner ID / Key)', data.configured],
+                    ['ฐานข้อมูลร้านค้า (migration 0009)', data.schema_ready],
+                    ['ร้านค้าอนุมัติสิทธิ์ (Seller authorization)', shops.some(s => s.status === 'connected')]
+                ];
+                const rows = shops.length ? shops.map(s => '<div class="mt-2 flex items-center justify-between gap-2 rounded-lg bg-slate-900/70 p-3"><div class="min-w-0"><p class="truncate text-sm text-white">' + escapeHtml(s.shop_name) + '</p><p class="text-[11px] text-amber-300">● ' + escapeHtml(s.status) + (s.shop_status ? ' · ร้าน ' + escapeHtml(s.shop_status) : '') + (s.region ? ' · ' + escapeHtml(s.region) : '') + '</p><p class="mt-1 text-[10px] text-slate-400">Shop ID ' + escapeHtml(s.shop_id) + (s.auth_expire_at ? ' · สิทธิ์หมดอายุ ' + escapeHtml(new Date(s.auth_expire_at).toLocaleDateString('th-TH')) : '') + (s.verified_at ? ' · ตรวจล่าสุด ' + escapeHtml(new Date(s.verified_at).toLocaleString('th-TH')) : '') + '</p>' + (s.status === 'connected' ? '<button onclick="verifyShopeeShop(&quot;' + s.id + '&quot;)" class="mt-1 text-[11px] text-sky-300 hover:text-sky-200">ตรวจการเชื่อมต่อ</button>' : '') + '</div><button onclick="disconnectShopeeShop(&quot;' + s.id + '&quot;)" class="text-[11px] text-rose-300 hover:text-rose-200">ยกเลิกการเชื่อม</button></div>').join('') : '<p class="mt-2 text-xs text-slate-500">ยังไม่มีร้านค้าที่เชื่อม</p>';
+                panel.innerHTML = '<section class="rounded-xl border border-orange-400/30 bg-slate-950/50 p-4">' +
+                    '<div class="flex items-center justify-between"><h3 class="text-sm font-semibold text-white">ร้านค้า Shopee (Seller · Open Platform)</h3><span class="rounded-full bg-slate-800 px-2 py-1 text-[10px] text-slate-400">' + escapeHtml(data.environment || 'live') + ' · อ่านอย่างเดียว</span></div>' +
+                    '<p class="mt-1 text-[11px] text-slate-400">แยกจาก Shopee Affiliate · อ่านข้อมูลร้าน (ชื่อ สถานะ วันหมดสิทธิ์) เท่านั้น · ไม่สร้าง/แก้สินค้า ไม่จัดการคำสั่งซื้อ ไม่ทำธุรกรรม</p>' +
+                    '<ol class="mt-3 space-y-1 text-[11px]">' + steps.map(([label, ok], i) => '<li class="' + (ok ? 'text-emerald-300' : 'text-slate-400') + '">' + (ok ? '✓' : (i + 1) + '.') + ' ' + label + '</li>').join('') + '</ol>' +
+                    rows +
+                    (ready
+                        ? '<button onclick="connectShopeeShop()" class="mt-3 w-full rounded-lg border border-orange-400/40 bg-orange-500/10 px-3 py-2 text-xs text-orange-200 hover:bg-orange-500/20">เชื่อมร้านค้า Shopee · Seller authorization</button><p class="mt-2 text-[10px] text-slate-500">เจ้าของร้านล็อกอิน Shopee ยืนยัน OTP แล้วกดอนุญาต (เลือกอายุสิทธิ์ได้ถึง 365 วัน)</p>'
+                        : '<button disabled title="ต้องมีแอป Shopee Open Platform และ Seller authorization ก่อน" class="mt-3 w-full cursor-not-allowed rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-500">รอแอป Shopee Open Platform + Seller authorization</button>') +
+                    '</section>';
+            } catch (error) {
+                panel.innerHTML = '<div class="rounded-xl border border-rose-500/30 bg-rose-500/10 p-4 text-sm text-rose-200">โหลดโมดูลร้านค้าไม่ได้: ' + escapeHtml(error.message) + '</div>';
+            }
+        }
+        async function connectShopeeShop() {
+            if (!confirm('เชื่อมร้านค้า Shopee แบบอ่านข้อมูลอย่างเดียว\nต้องให้เจ้าของร้านล็อกอินและกดอนุญาต (Seller authorization) บนหน้า Shopee\nดำเนินการต่อหรือไม่?')) return;
+            const popup = window.open('about:blank', 'alphaCentauriShopeeSellerOAuth', 'popup,width=620,height=760');
+            if (!popup) { alert('เบราว์เซอร์บล็อกหน้าต่าง OAuth กรุณาอนุญาต Pop-ups สำหรับเว็บไซต์นี้'); return; }
+            try {
+                const data = await scRequest('/oauth/shopee-seller/start', {method:'POST', body:'{}'});
+                if (!data.authorization_url) throw new Error('Shopee authorization URL was not returned');
+                popup.location.href = data.authorization_url;
+            } catch (error) { popup.close(); alert(error.message); }
+        }
+        async function verifyShopeeShop(id) {
+            try {
+                const r = await scRequest('/shopee-seller/shops/' + encodeURIComponent(id) + '/verify', {method:'POST', body:'{}'});
+                alert('ร้านค้า Shopee เชื่อมต่อใช้งานได้: ' + (r.shop_name || '') + ' (ตรวจเมื่อ ' + new Date(r.verified_at).toLocaleString('th-TH') + ')');
+            } catch (error) { alert('ตรวจการเชื่อมต่อร้านค้าไม่สำเร็จ: ' + error.message); }
+            await renderShopeeSeller();
+        }
+        async function disconnectShopeeShop(id) {
+            if (!confirm('ยกเลิกการเชื่อมร้านค้านี้หรือไม่? Token ที่เก็บไว้จะถูกล้าง (ยกเลิกสิทธิ์ฝั่ง Shopee ได้ที่ Seller Centre)')) return;
+            try { await scRequest('/shopee-seller/shops/' + encodeURIComponent(id), {method:'DELETE'}); } catch (error) { alert(error.message); }
+            await renderShopeeSeller();
         }
         // "แอดมินโซเชียล" auto-like: the connected Page likes its own posts (Cloud Worker cron every 5 minutes).
         const AUTO_LIKE_STATUS_TEXT = {pending:'รอคิว', liking:'กำลังกดถูกใจ', liked:'กดถูกใจแล้ว', failed:'ไม่สำเร็จ', unknown:'ไม่ทราบผล (ไม่ลองซ้ำ)'};
