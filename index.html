@@ -876,14 +876,34 @@
         let scActiveTab = 'accounts';
         window.addEventListener('message', event => {
             if (event.origin !== 'https://social-api.siamhrbp.com') return;
-            if (event.data?.type !== 'ALPHA_CENTAURI_META_OAUTH') return;
+            const label = event.data?.type === 'ALPHA_CENTAURI_META_OAUTH' ? 'Meta' : event.data?.type === 'ALPHA_CENTAURI_TIKTOK_OAUTH' ? 'TikTok' : null;
+            if (!label) return;
             if (event.data.status === 'connected') {
-                alert('เชื่อมต่อ Meta สำเร็จ: ' + (event.data.message || 'บัญชีได้รับการบันทึกแล้ว'));
+                alert('เชื่อมต่อ ' + label + ' สำเร็จ: ' + (event.data.message || 'บัญชีได้รับการบันทึกแล้ว'));
                 if (scActiveTab === 'accounts' && sessionStorage.getItem('sc_session')) renderSocialAccounts();
             } else {
-                alert(event.data.message || 'เชื่อมต่อ Meta ไม่สำเร็จ กรุณาตรวจสอบการตั้งค่าและ Worker logs');
+                alert(event.data.message || 'เชื่อมต่อ ' + label + ' ไม่สำเร็จ กรุณาตรวจสอบการตั้งค่าและ Worker logs');
             }
         });
+        async function connectTikTokAccount() {
+            const popup = window.open('about:blank', 'alphaCentauriTikTokOAuth', 'popup,width=620,height=760');
+            if (!popup) { alert('เบราว์เซอร์บล็อกหน้าต่าง OAuth กรุณาอนุญาต Pop-ups สำหรับเว็บไซต์นี้'); return; }
+            try {
+                const data = await scRequest('/oauth/tiktok/start', {method:'POST', body:'{}'});
+                if (!data.authorization_url) throw new Error('TikTok authorization URL was not returned');
+                popup.location.href = data.authorization_url;
+            } catch (error) {
+                popup.close();
+                alert(error.message);
+            }
+        }
+        async function verifyTikTokAccount(id) {
+            try {
+                const r = await scRequest('/accounts/' + encodeURIComponent(id) + '/verify', {method:'POST', body:'{}'});
+                alert('TikTok เชื่อมต่อใช้งานได้: ' + (r.account_name || '') + ' (ตรวจเมื่อ ' + new Date(r.verified_at).toLocaleString('th-TH') + ')');
+            } catch (error) { alert('ตรวจการเชื่อมต่อ TikTok ไม่สำเร็จ: ' + error.message); }
+            await renderSocialAccounts();
+        }
 
         function openSocialCommerce() {
             const modal = document.getElementById('social-commerce-modal');
@@ -1017,11 +1037,15 @@
                 panel.innerHTML = '<div class="mb-4 flex justify-end"><button onclick="logoutSocialCommerce()" class="rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-300">ออกจากระบบ</button></div>' + groups.map(group => '<section class="mb-6"><h3 class="mb-3 text-sm font-semibold text-slate-200">' + group.title + '</h3><div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">' +
                     group.platforms.map(([key,name]) => {
                         const accounts = scAccounts.filter(a => a.platform === key);
-                        const state = accounts.length ? accounts.map(a => '<div class="mt-2 flex items-center justify-between gap-2 rounded-lg bg-slate-900/70 p-2"><div class="min-w-0"><p class="truncate text-xs text-white">' + escapeHtml(a.account_name) + '</p><p class="text-[10px] text-amber-300">● ' + escapeHtml(a.status) + '</p>' + (key === 'facebook' ? (a.publish_ready ? '<p class="mt-1 text-[10px] text-emerald-300">✓ พร้อมเผยแพร่โพสต์จริง</p>' : '<p class="mt-1 text-[10px] text-amber-300">ต้องตรวจสิทธิ์ใหม่: ' + escapeHtml((a.publish_blockers || []).join(', ')) + '</p>') : '') + '</div><button onclick="disconnectSocialAccount(&quot;' + a.id + '&quot;)" class="text-[10px] text-rose-300 hover:text-rose-200">ลบ</button></div>').join('') : '<p class="mt-2 text-xs text-slate-500">ยังไม่มีบัญชี</p>';
+                        const state = accounts.length ? accounts.map(a => '<div class="mt-2 flex items-center justify-between gap-2 rounded-lg bg-slate-900/70 p-2"><div class="min-w-0"><p class="truncate text-xs text-white">' + escapeHtml(a.account_name) + '</p><p class="text-[10px] text-amber-300">● ' + escapeHtml(a.status) + '</p>' + (key === 'facebook' ? (a.publish_ready ? '<p class="mt-1 text-[10px] text-emerald-300">✓ พร้อมเผยแพร่โพสต์จริง</p>' : '<p class="mt-1 text-[10px] text-amber-300">ต้องตรวจสิทธิ์ใหม่: ' + escapeHtml((a.publish_blockers || []).join(', ')) + '</p>') : '') + (key === 'tiktok' ? '<p class="mt-1 text-[10px] text-slate-400">เชื่อมบัญชีแล้ว · ยังไม่เปิดการโพสต์' + (a.connection?.verified_at ? ' · ตรวจล่าสุด ' + escapeHtml(new Date(a.connection.verified_at).toLocaleString('th-TH')) : '') + '</p>' + (a.status === 'connected' ? '<button onclick="verifyTikTokAccount(&quot;' + a.id + '&quot;)" class="mt-1 text-[10px] text-sky-300 hover:text-sky-200">ตรวจการเชื่อมต่อ</button>' : '') : '') + '</div><button onclick="disconnectSocialAccount(&quot;' + a.id + '&quot;)" class="text-[10px] text-rose-300 hover:text-rose-200">ลบ</button></div>').join('') : '<p class="mt-2 text-xs text-slate-500">ยังไม่มีบัญชี</p>';
                         const action = key.endsWith('_affiliate')
                           ? '<button disabled title="รอ Affiliate Publisher API approval" class="mt-3 w-full cursor-not-allowed rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-500">รอ Affiliate API Authorization</button>'
                           : (key === 'facebook' || key === 'instagram')
                             ? '<button onclick="connectMetaAccounts(\'' + key + '\')" class="mt-3 w-full rounded-lg border border-sky-400/40 bg-sky-500/10 px-3 py-2 text-xs text-sky-200 hover:bg-sky-500/20">' + (key === 'instagram' ? 'เชื่อมต่อ Instagram · Unified Login' : 'เชื่อมต่อ Facebook Page') + '</button>' + (key === 'instagram' ? '<p class="mt-2 text-[10px] text-slate-500">ใช้ Instagram API Unified Login และ Instagram account asset ใน Business Portfolio</p>' : '<p class="mt-2 text-[10px] text-slate-500">ใช้ Facebook Login for Business configuration และ Page assets</p>')
+                            : key === 'tiktok'
+                              ? (window.scCloudHealth?.platforms?.tiktok === 'oauth_ready'
+                                ? '<button onclick="connectTikTokAccount()" class="mt-3 w-full rounded-lg border border-pink-400/40 bg-pink-500/10 px-3 py-2 text-xs text-pink-200 hover:bg-pink-500/20">เชื่อมต่อ TikTok · Login Kit</button><p class="mt-2 text-[10px] text-slate-500">เชื่อมบัญชีเท่านั้น (user.info.basic) · การโพสต์ต้องเปิดแยกหลังได้รับอนุมัติ Content Posting API</p>'
+                                : '<button disabled title="ยังไม่ได้ตั้งค่า TIKTOK_CLIENT_KEY / TIKTOK_CLIENT_SECRET บน Cloud Worker" class="mt-3 w-full cursor-not-allowed rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-500">รอตั้งค่า TikTok App (Client Key)</button>')
                             : '<button disabled title="รอ OAuth App และการอนุมัติสิทธิ์" class="mt-3 w-full cursor-not-allowed rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-500">รอตั้งค่า OAuth / App Review</button>';
                         return '<article class="rounded-xl border border-slate-700/80 bg-slate-950/50 p-3"><div class="flex items-center justify-between"><h4 class="text-sm font-medium text-white">' + name + '</h4><span class="rounded-full bg-slate-800 px-2 py-1 text-[10px] text-slate-400">' + accounts.length + ' บัญชี</span></div>' + state + action + '</article>';
                     }).join('') + '</div></section>').join('');

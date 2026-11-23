@@ -97,9 +97,128 @@ export function buildMetaAuthorizationUrl(env,state,platform="instagram") {
  url.searchParams.set("response_type","code");
  return url.toString();
 }
-function metaResultPage(status,message) {
- const payload=JSON.stringify({type:"ALPHA_CENTAURI_META_OAUTH",status,message});
- return new Response("<!doctype html><html lang='th'><meta charset='utf-8'><title>Meta connection</title><body style='font:16px sans-serif;background:#090d1e;color:#e2e8f0;padding:32px'><p>"+(status==="connected"?"เชื่อมต่อ Meta สำเร็จ":"การเชื่อมต่อ Meta ไม่สำเร็จ")+"</p><script>const data="+payload+";if(window.opener){for(const o of "+JSON.stringify(DASHBOARD_ORIGINS)+"){try{window.opener.postMessage(data,o);}catch(e){}}}setTimeout(()=>window.close(),900);</script></body></html>",{status:200,headers:{"Content-Type":"text/html; charset=utf-8","Cache-Control":"no-store","X-Content-Type-Options":"nosniff"}});
+function oauthResultPage(type,label,status,message) {
+ const payload=JSON.stringify({type,status,message}).replace(/</g,"\\u003c");
+ return new Response("<!doctype html><html lang='th'><meta charset='utf-8'><title>"+label+" connection</title><body style='font:16px sans-serif;background:#090d1e;color:#e2e8f0;padding:32px'><p>"+(status==="connected"?"เชื่อมต่อ "+label+" สำเร็จ":"การเชื่อมต่อ "+label+" ไม่สำเร็จ")+"</p><script>const data="+payload+";if(window.opener){for(const o of "+JSON.stringify(DASHBOARD_ORIGINS)+"){try{window.opener.postMessage(data,o);}catch(e){}}}setTimeout(()=>window.close(),900);</script></body></html>",{status:200,headers:{"Content-Type":"text/html; charset=utf-8","Cache-Control":"no-store","X-Content-Type-Options":"nosniff"}});
+}
+function metaResultPage(status,message) { return oauthResultPage("ALPHA_CENTAURI_META_OAUTH","Meta",status,message); }
+// ---- TikTok Login Kit (web): connect TikTok accounts. Connection only; publishing is NOT enabled here. ----
+// Docs: developers.tiktok.com/doc/login-kit-web, /doc/oauth-user-access-token-management, /doc/tiktok-api-v2-get-user-info
+const TIKTOK_AUTH_URL="https://www.tiktok.com/v2/auth/authorize/";
+const TIKTOK_API="https://open.tiktokapis.com/v2";
+const TIKTOK_DEFAULT_REDIRECT="https://social-api.siamhrbp.com/api/social-commerce/oauth/tiktok/callback";
+const TIKTOK_USER_FIELDS="open_id,union_id,avatar_url,display_name";
+export const tiktokRedirectUri=(env)=>String(env.TIKTOK_REDIRECT_URI||TIKTOK_DEFAULT_REDIRECT).trim();
+export const tiktokConfigured=(env)=>!!(String(env.TIKTOK_CLIENT_KEY||"").trim()&&String(env.TIKTOK_CLIENT_SECRET||"").trim());
+export function tiktokScopes(env) {
+ const scopes=String(env.TIKTOK_SCOPES||"user.info.basic").split(/[\s,]+/).filter(s=>/^[a-z0-9_.]+$/i.test(s));
+ return [...new Set(["user.info.basic",...scopes])];
+}
+export function buildTikTokAuthorizationUrl(env,state) {
+ if(!tiktokConfigured(env)) throw new Error("TikTok Login Kit is not configured");
+ const url=new URL(TIKTOK_AUTH_URL);
+ url.searchParams.set("client_key",String(env.TIKTOK_CLIENT_KEY).trim());
+ url.searchParams.set("scope",tiktokScopes(env).join(","));
+ url.searchParams.set("response_type","code");
+ url.searchParams.set("redirect_uri",tiktokRedirectUri(env));
+ url.searchParams.set("state",state);
+ url.searchParams.set("disable_auto_auth","1");
+ return url.toString();
+}
+function tiktokResultPage(status,message) { return oauthResultPage("ALPHA_CENTAURI_TIKTOK_OAUTH","TikTok",status,message); }
+async function tiktokTokenRequest(env,params) {
+ const body=new URLSearchParams({client_key:String(env.TIKTOK_CLIENT_KEY).trim(),client_secret:String(env.TIKTOK_CLIENT_SECRET).trim(),...params});
+ const response=await fetch(TIKTOK_API+"/oauth/token/",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded","Cache-Control":"no-cache"},body});
+ const data=await response.json().catch(()=>({}));
+ if(!response.ok||data.error||!data.access_token||!data.open_id) throw new Error("TikTok token request failed: "+safeText(data.error_description||data.error||response.statusText||"no access token",240));
+ return data;
+}
+export async function tiktokUserInfo(accessToken) {
+ const response=await fetch(TIKTOK_API+"/user/info/?fields="+TIKTOK_USER_FIELDS,{headers:{Authorization:"Bearer "+accessToken,Accept:"application/json"}});
+ const data=await response.json().catch(()=>({}));
+ if(!response.ok||(data.error&&data.error.code!=="ok")||!data.data?.user?.open_id) throw new Error("TikTok user info request failed: "+safeText(data.error?.message||data.error?.code||response.statusText||"no user",240));
+ return data.data.user;
+}
+const tiktokExpiry=(seconds)=>Number(seconds)>0?new Date(Date.now()+Number(seconds)*1000).toISOString():null;
+const tiktokScopeList=(scope)=>String(scope||"").split(",").map(s=>s.trim()).filter(Boolean).sort();
+async function saveTikTokAccount(env,user,profile,token) {
+ const id=random(16),stamp=now(),scopes=tiktokScopeList(token.scope);
+ const name=safeText(profile.display_name||"TikTok account",160);
+ const meta=JSON.stringify({union_id:profile.union_id||null,refresh_expires_at:tiktokExpiry(token.refresh_expires_in),verified_at:stamp});
+ await env.DB.prepare("INSERT INTO social_accounts(id,owner_user_id,platform,external_account_id,account_name,profile_picture_url,status,scopes_json,page_tasks_json,token_expires_at,encrypted_access_token,encrypted_refresh_token,created_at,updated_at) VALUES(?,?,'tiktok',?,?,?,'connected',?,?,?,?,?,?,?) ON CONFLICT(owner_user_id,platform,external_account_id) DO UPDATE SET account_name=excluded.account_name,profile_picture_url=excluded.profile_picture_url,status='connected',scopes_json=excluded.scopes_json,page_tasks_json=excluded.page_tasks_json,token_expires_at=excluded.token_expires_at,encrypted_access_token=excluded.encrypted_access_token,encrypted_refresh_token=excluded.encrypted_refresh_token,updated_at=excluded.updated_at")
+  .bind(id,user.id,String(token.open_id),name,profile.avatar_url||null,JSON.stringify(scopes),meta,tiktokExpiry(token.expires_in),await encrypt(token.access_token,env),token.refresh_token?await encrypt(token.refresh_token,env):null,stamp,stamp).run();
+ await audit(env,user.id,"tiktok_account_connected","account",String(token.open_id),user.email,{platform:"tiktok",account_name:name,scopes});
+ return {name,scopes};
+}
+async function finishTikTokOAuth(request,env,url) {
+ const state=url.searchParams.get("state"),code=url.searchParams.get("code");
+ const stateHash=state?await sha(state):null;
+ const stateRow=stateHash?await env.DB.prepare("SELECT owner_user_id,platform,expires_at FROM oauth_states WHERE state_hash=? AND platform='tiktok'").bind(stateHash).first():null;
+ if(stateRow) await env.DB.prepare("DELETE FROM oauth_states WHERE state_hash=?").bind(stateHash).run();
+ if(url.searchParams.get("error")) return tiktokResultPage("error","TikTok authorization was cancelled or denied");
+ if(!stateRow||stateRow.expires_at<=now()) return tiktokResultPage("error","OAuth state is invalid or expired");
+ if(!code) return tiktokResultPage("error","Missing authorization response");
+ let stage="token_exchange";
+ try {
+  if(!tiktokConfigured(env)) throw new Error("TikTok configuration is missing");
+  const userRow=await env.DB.prepare("SELECT id,email FROM app_users WHERE id=?").bind(stateRow.owner_user_id).first();
+  if(!userRow) throw new Error("Social Commerce user no longer exists");
+  const token=await tiktokTokenRequest(env,{code,grant_type:"authorization_code",redirect_uri:tiktokRedirectUri(env)});
+  stage="user_info";
+  const profile=await tiktokUserInfo(token.access_token);
+  if(String(profile.open_id)!==String(token.open_id)) throw new Error("TikTok user info did not match the authorized account");
+  stage="persist_account";
+  const saved=await saveTikTokAccount(env,userRow,profile,token);
+  await audit(env,userRow.id,"tiktok_oauth_completed","integration","tiktok",userRow.email,{granted_scopes:saved.scopes,expires_at:tiktokExpiry(token.expires_in)});
+  return tiktokResultPage("connected","TikTok: "+saved.name);
+ } catch(e) {
+  const diagnostic=safeText(e?.message||"unknown TikTok OAuth error",300);
+  console.error("tiktok-oauth-callback",{stage,message:diagnostic});
+  try { await audit(env,stateRow.owner_user_id,"tiktok_oauth_failed","integration","tiktok","tiktok-oauth-callback",{stage,error:diagnostic}); } catch {}
+  return tiktokResultPage("error","TikTok connection failed during "+stage+". Diagnostic has been recorded for the system administrator.");
+ }
+}
+// Returns a usable access token, refreshing it (refresh tokens rotate) when it expires within 5 minutes.
+async function tiktokAccessToken(env,account) {
+ if(account.status!=="connected"||!account.encrypted_access_token) throw new Error("TikTok account is not connected");
+ if(account.token_expires_at&&Date.parse(account.token_expires_at)>Date.now()+5*60000) return decrypt(account.encrypted_access_token,env);
+ if(!account.encrypted_refresh_token) throw new Error("TikTok access token expired and no refresh token is stored; reconnect the account");
+ let token;
+ try { token=await tiktokTokenRequest(env,{grant_type:"refresh_token",refresh_token:await decrypt(account.encrypted_refresh_token,env)}); }
+ catch(e) { await env.DB.prepare("UPDATE social_accounts SET status='expired',updated_at=? WHERE id=?").bind(now(),account.id).run(); throw e; }
+ const meta={...JSON.parse(account.page_tasks_json||"{}"),refresh_expires_at:tiktokExpiry(token.refresh_expires_in)};
+ await env.DB.prepare("UPDATE social_accounts SET encrypted_access_token=?,encrypted_refresh_token=?,token_expires_at=?,scopes_json=?,page_tasks_json=?,updated_at=? WHERE id=?")
+  .bind(await encrypt(token.access_token,env),token.refresh_token?await encrypt(token.refresh_token,env):account.encrypted_refresh_token,tiktokExpiry(token.expires_in),JSON.stringify(tiktokScopeList(token.scope)),JSON.stringify(meta),now(),account.id).run();
+ return token.access_token;
+}
+const TIKTOK_ACCOUNT_SQL="SELECT id,owner_user_id,external_account_id,account_name,status,scopes_json,page_tasks_json,token_expires_at,encrypted_access_token,encrypted_refresh_token FROM social_accounts";
+async function verifyTikTokAccount(env,user,accountId) {
+ const account=await env.DB.prepare(TIKTOK_ACCOUNT_SQL+" WHERE id=? AND owner_user_id=? AND platform='tiktok'").bind(accountId,user.id).first();
+ if(!account) return {status:404,body:{error:"TikTok account not found"}};
+ try {
+  const profile=await tiktokUserInfo(await tiktokAccessToken(env,account));
+  if(String(profile.open_id)!==String(account.external_account_id)) throw new Error("TikTok returned a different account");
+  const stamp=now(),meta={...JSON.parse(account.page_tasks_json||"{}"),verified_at:stamp};
+  await env.DB.prepare("UPDATE social_accounts SET account_name=?,profile_picture_url=?,page_tasks_json=?,updated_at=? WHERE id=?").bind(safeText(profile.display_name||account.account_name,160),profile.avatar_url||null,JSON.stringify(meta),stamp,account.id).run();
+  await audit(env,user.id,"tiktok_account_verified","account",account.id,user.email,{open_id:account.external_account_id});
+  return {status:200,body:{id:account.id,platform:"tiktok",connected:true,account_name:profile.display_name||account.account_name,open_id:account.external_account_id,verified_at:stamp}};
+ } catch(e) {
+  const message=safeText(e?.message||"TikTok check failed",240);
+  await audit(env,user.id,"tiktok_account_verify_failed","account",account.id,user.email,{error:message});
+  return {status:502,body:{id:account.id,connected:false,error:message}};
+ }
+}
+async function revokeTikTokToken(env,account) {
+ if(!tiktokConfigured(env)||!account.encrypted_access_token) return false;
+ try {
+  const response=await fetch(TIKTOK_API+"/oauth/revoke/",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:new URLSearchParams({client_key:String(env.TIKTOK_CLIENT_KEY).trim(),client_secret:String(env.TIKTOK_CLIENT_SECRET).trim(),token:await decrypt(account.encrypted_access_token,env)})});
+  return response.ok;
+ } catch { return false; }
+}
+export function accountReadiness(account,scopes,pageTasks) {
+ if(account.platform==="facebook") return facebookPublishReadiness(scopes,pageTasks);
+ if(account.platform==="tiktok") return {ready:false,missing:["TikTok publishing is not enabled (connection only)"]};
+ return {ready:false,missing:["adapter not enabled"]};
 }
 // ---- "แอดมินโซเชียล" auto-like: the connected Page likes its own posts only ----
 const AUTO_LIKE_MAX_PER_RUN=5, AUTO_LIKE_SCAN_LIMIT=10, AUTO_LIKE_MAX_BACKFILL=5;
@@ -562,12 +681,13 @@ async function handle(request,env) {
  if(wantsDashboard(request,url,env)) return serveDashboard(request,env);
  if(path==="/webhooks/meta") return handleWebhook(request,env,url);
  if(method==="GET"&&path==="/oauth/meta/callback") return finishMetaOAuth(request,env,url);
+ if(method==="GET"&&path==="/oauth/tiktok/callback") return finishTikTokOAuth(request,env,url);
  if(method==="GET"&&(path==="/"||path==="/health")) {
   const setup=!!env.BOOTSTRAP_KEY&&!!env.TOKEN_ENCRYPTION_KEY;
   const users=await env.DB.prepare("SELECT COUNT(*) n FROM app_users").first();
   const {results:facebookAccounts=[]}=await env.DB.prepare("SELECT scopes_json,page_tasks_json FROM social_accounts WHERE platform='facebook' AND status='connected'").all();
   const publishReadyAccounts=facebookAccounts.filter(a=>facebookPublishReadiness(JSON.parse(a.scopes_json||"[]"),JSON.parse(a.page_tasks_json||"[]")).ready).length;
-  return json({service:"Alpha Centauri Social Commerce Cloud API",status:"online",mode:"cloud",setup_ready:setup,admin_initialized:(users?.n||0)>0,publishing_enabled:publishReadyAccounts>0,publishing_adapter_enabled:true,publishing_adapter:"facebook_page_photo",publishing_formats:["text","photo"],publish_ready_accounts:publishReadyAccounts,meta_oauth_configured:metaAnyConfigured(env),meta_instagram_configured:metaConfigured(env,"instagram"),meta_facebook_configured:metaConfigured(env,"facebook"),meta_webhook_configured:webhookConfigured(env),meta_redirect_uri:env.META_REDIRECT_URI||null,platforms:Object.fromEntries(PLATFORMS.map(p=>[p,p==="instagram"?(metaConfigured(env,"instagram")?"oauth_ready":"oauth_not_configured"):p==="facebook"?(metaConfigured(env,"facebook")?"oauth_ready":"oauth_not_configured"):"oauth_not_configured"]))},200,cors(request));
+  return json({service:"Alpha Centauri Social Commerce Cloud API",status:"online",mode:"cloud",setup_ready:setup,admin_initialized:(users?.n||0)>0,publishing_enabled:publishReadyAccounts>0,publishing_adapter_enabled:true,publishing_adapter:"facebook_page_photo",publishing_formats:["text","photo"],publish_ready_accounts:publishReadyAccounts,meta_oauth_configured:metaAnyConfigured(env),meta_instagram_configured:metaConfigured(env,"instagram"),meta_facebook_configured:metaConfigured(env,"facebook"),meta_webhook_configured:webhookConfigured(env),meta_redirect_uri:env.META_REDIRECT_URI||null,tiktok_oauth_configured:tiktokConfigured(env),tiktok_redirect_uri:tiktokRedirectUri(env),tiktok_scopes:tiktokScopes(env),tiktok_publishing_enabled:false,platforms:Object.fromEntries(PLATFORMS.map(p=>[p,p==="instagram"?(metaConfigured(env,"instagram")?"oauth_ready":"oauth_not_configured"):p==="facebook"?(metaConfigured(env,"facebook")?"oauth_ready":"oauth_not_configured"):p==="tiktok"?(tiktokConfigured(env)?"oauth_ready":"oauth_not_configured"):"oauth_not_configured"]))},200,cors(request));
  }
  if(method==="POST"&&path==="/auth/bootstrap") {
   if(!env.BOOTSTRAP_KEY||(request.headers.get("Authorization")||"").replace(/^Bootstrap\s+/i,"")!==env.BOOTSTRAP_KEY) return json({error:"Invalid bootstrap key"},403,cors(request));
@@ -604,9 +724,18 @@ async function handle(request,env) {
   await env.DB.prepare("INSERT INTO oauth_states(state_hash,owner_user_id,platform,expires_at,created_at) VALUES(?,?,?,?,?)").bind(await sha(state),user.id,"meta_"+platform,expiry,stamp).run();
   return json({authorization_url:buildMetaAuthorizationUrl(env,state,platform),expires_at:expiry,redirect_uri:env.META_REDIRECT_URI,platform,login_mode:"unified_login_config_id"},200,cors(request));
  }
+ if(method==="POST"&&path==="/oauth/tiktok/start") {
+  if(!tiktokConfigured(env)) return json({error:"TikTok Login Kit is not configured on the Cloudflare Worker (TIKTOK_CLIENT_KEY / TIKTOK_CLIENT_SECRET)"},503,cors(request));
+  const state=random(32),stamp=now(),expiry=new Date(Date.now()+10*60*1000).toISOString();
+  await env.DB.prepare("DELETE FROM oauth_states WHERE expires_at<=?").bind(stamp).run();
+  await env.DB.prepare("INSERT INTO oauth_states(state_hash,owner_user_id,platform,expires_at,created_at) VALUES(?,?,?,?,?)").bind(await sha(state),user.id,"tiktok",expiry,stamp).run();
+  return json({authorization_url:buildTikTokAuthorizationUrl(env,state),expires_at:expiry,redirect_uri:tiktokRedirectUri(env),platform:"tiktok",scopes:tiktokScopes(env)},200,cors(request));
+ }
+ const tiktokVerify=path.match(/^\/accounts\/([a-zA-Z0-9_-]+)\/verify$/);
+ if(method==="POST"&&tiktokVerify) { const r=await verifyTikTokAccount(env,user,tiktokVerify[1]); return json(r.body,r.status,cors(request)); }
  if(method==="GET"&&path==="/accounts") {
   const {results=[]}=await env.DB.prepare("SELECT id,platform,external_account_id,account_name,profile_picture_url,status,scopes_json,page_tasks_json,token_expires_at,created_at,updated_at FROM social_accounts WHERE owner_user_id=? ORDER BY platform,account_name").bind(user.id).all();
-  return json({accounts:results.map(a=>{const scopes=JSON.parse(a.scopes_json||"[]"),page_tasks=JSON.parse(a.page_tasks_json||"[]");const readiness=a.platform==="facebook"?facebookPublishReadiness(scopes,page_tasks):{ready:false,missing:["adapter not enabled"]};return {...a,scopes,page_tasks,publish_ready:readiness.ready,publish_blockers:readiness.missing};})},200,cors(request));
+  return json({accounts:results.map(a=>{const scopes=JSON.parse(a.scopes_json||"[]"),meta=JSON.parse(a.page_tasks_json||"[]"),page_tasks=Array.isArray(meta)?meta:[];const readiness=accountReadiness(a,scopes,page_tasks);const {page_tasks_json,...rest}=a;return {...rest,page_tasks_json:Array.isArray(meta)?page_tasks_json:"[]",scopes,page_tasks,connection:Array.isArray(meta)?null:{verified_at:meta.verified_at||null,refresh_expires_at:meta.refresh_expires_at||null},publish_ready:readiness.ready,publish_blockers:readiness.missing};})},200,cors(request));
  }
  if(method==="POST"&&path==="/accounts") {
   const b=await request.json();
@@ -615,10 +744,11 @@ async function handle(request,env) {
  }
  const accountMatch=path.match(/^\/accounts\/([a-zA-Z0-9_-]+)$/);
  if(method==="DELETE"&&accountMatch) {
-  const a=await env.DB.prepare("SELECT id,platform FROM social_accounts WHERE id=? AND owner_user_id=?").bind(accountMatch[1],user.id).first();
+  const a=await env.DB.prepare("SELECT id,platform,encrypted_access_token FROM social_accounts WHERE id=? AND owner_user_id=?").bind(accountMatch[1],user.id).first();
   if(!a) return json({error:"Account not found"},404,cors(request));
+  const revoked=a.platform==="tiktok"?await revokeTikTokToken(env,a):null;
   await env.DB.prepare("UPDATE social_accounts SET status='disconnected',encrypted_access_token=NULL,encrypted_refresh_token=NULL,updated_at=? WHERE id=? AND owner_user_id=?").bind(now(),a.id,user.id).run();
-  await audit(env,user.id,"account_disconnected","account",a.id,user.email,{platform:a.platform});
+  await audit(env,user.id,"account_disconnected","account",a.id,user.email,{platform:a.platform,...(revoked===null?{}:{token_revoked:revoked})});
   return json({id:a.id,status:"disconnected"},200,cors(request));
  }
  if(method==="POST"&&path==="/workflows") {
