@@ -31,7 +31,7 @@ jobs:
         with:
           node-version: '22'
       - name: Test Meta Worker and dashboard JavaScript
-        run: node --test tests/activity_log.test.mjs tests/meta_worker.test.mjs tests/index_inline_scripts.test.mjs tests/dashboard_route.test.mjs tests/facebook_publish.test.mjs tests/chat_facebook_command.test.mjs tests/auto_like.test.mjs tests/workflow.test.mjs tests/tiktok_oauth.test.mjs tests/shopee_affiliate.test.mjs tests/shopee_seller.test.mjs tests/content_guard.test.mjs
+        run: node --test tests/activity_log.test.mjs tests/meta_worker.test.mjs tests/index_inline_scripts.test.mjs tests/dashboard_route.test.mjs tests/facebook_publish.test.mjs tests/chat_facebook_command.test.mjs tests/auto_like.test.mjs tests/workflow.test.mjs tests/tiktok_oauth.test.mjs tests/shopee_affiliate.test.mjs tests/shopee_seller.test.mjs tests/content_guard.test.mjs tests/comment_dm.test.mjs
       - name: Build Worker Dashboard assets
         run: node scripts/build-dashboard-assets.mjs && test -f dist/dashboard/index.html
       - name: Check Cloudflare Worker syntax
