@@ -215,9 +215,82 @@ async function revokeTikTokToken(env,account) {
   return response.ok;
  } catch { return false; }
 }
+// ---- Shopee Affiliate Open API (Thailand): account connection check only. ----
+// Docs: affiliate.shopee.co.th/open_api/document (Authentication; Request and Response).
+// Read-only: one signed shopeeOfferV2 query. No short links, orders, listings or other transactions here.
+// AppID/Secret are issued by Shopee after Affiliate Open API approval and live only as Worker secrets.
+const SHOPEE_AFFILIATE_DEFAULT_ENDPOINT="https://open-api.affiliate.shopee.co.th/graphql";
+export const SHOPEE_AFFILIATE_VERIFY_QUERY="{shopeeOfferV2(page:1,limit:1){nodes{offerName}pageInfo{page limit hasNextPage}}}";
+export const shopeeAffiliateEndpoint=(env)=>{
+ const value=String(env.SHOPEE_AFFILIATE_ENDPOINT||"").trim();
+ return /^https:\/\/open-api\.affiliate\.shopee\.[a-z.]{2,12}\/graphql$/.test(value)?value:SHOPEE_AFFILIATE_DEFAULT_ENDPOINT;
+};
+export const shopeeAffiliateConfigured=(env)=>!!(String(env.SHOPEE_AFFILIATE_APP_ID||"").trim()&&String(env.SHOPEE_AFFILIATE_SECRET||"").trim());
+const sha256Hex=async(text)=>[...new Uint8Array(await crypto.subtle.digest("SHA-256",new TextEncoder().encode(text)))].map(b=>b.toString(16).padStart(2,"0")).join("");
+// Authorization: SHA256 Credential={AppId}, Timestamp={ts}, Signature=sha256(AppId+Timestamp+Payload+Secret)
+export async function shopeeAffiliateAuthorization(appId,secret,timestamp,payload) {
+ const signature=await sha256Hex(String(appId)+String(timestamp)+String(payload)+String(secret));
+ return "SHA256 Credential="+appId+", Timestamp="+timestamp+", Signature="+signature;
+}
+export async function shopeeAffiliateCheck(env) {
+ if(!shopeeAffiliateConfigured(env)) throw new Error("Shopee Affiliate Open API is not configured");
+ const appId=String(env.SHOPEE_AFFILIATE_APP_ID).trim(),secret=String(env.SHOPEE_AFFILIATE_SECRET).trim();
+ const payload=JSON.stringify({query:SHOPEE_AFFILIATE_VERIFY_QUERY}),timestamp=Math.floor(Date.now()/1000);
+ const response=await fetch(shopeeAffiliateEndpoint(env),{method:"POST",headers:{"Content-Type":"application/json",Authorization:await shopeeAffiliateAuthorization(appId,secret,timestamp,payload)},body:payload});
+ const data=await response.json().catch(()=>({}));
+ const error=Array.isArray(data.errors)?data.errors[0]:null;
+ if(error) {
+  const code=error.extensions?.code;
+  const hint=code===10020?" (AppID/Secret ไม่ถูกต้องหรือหมดอายุ)":code===10030?" (เกินโควตาการเรียก API)":"";
+  throw new Error("Shopee Affiliate API error"+(code?" "+code:"")+": "+safeText(error.extensions?.message||error.message||"unknown",160)+hint);
+ }
+ if(!response.ok||!data.data?.shopeeOfferV2) throw new Error("Shopee Affiliate API request failed (HTTP "+response.status+")");
+ return {app_id:appId,sample_offers:(data.data.shopeeOfferV2.nodes||[]).length};
+}
+const maskedAppId=(id)=>{ const s=String(id||""); return "••••"+s.slice(-4); };
+async function connectShopeeAffiliate(env,user) {
+ if(!shopeeAffiliateConfigured(env)) return {status:503,body:{error:"Shopee Affiliate Open API is not configured on the Cloudflare Worker (SHOPEE_AFFILIATE_APP_ID / SHOPEE_AFFILIATE_SECRET)"}};
+ try {
+  const check=await shopeeAffiliateCheck(env);
+  const stamp=now(),name="Shopee Affiliate TH · AppID "+maskedAppId(check.app_id);
+  const meta=JSON.stringify({verified_at:stamp,mode:"read_only",endpoint:shopeeAffiliateEndpoint(env)});
+  await env.DB.prepare("INSERT INTO social_accounts(id,owner_user_id,platform,external_account_id,account_name,status,scopes_json,page_tasks_json,created_at,updated_at) VALUES(?,?,'shopee_affiliate',?,?,'connected',?,?,?,?) ON CONFLICT(owner_user_id,platform,external_account_id) DO UPDATE SET account_name=excluded.account_name,status='connected',scopes_json=excluded.scopes_json,page_tasks_json=excluded.page_tasks_json,updated_at=excluded.updated_at")
+   .bind(random(16),user.id,check.app_id,name,JSON.stringify(["offer.read"]),meta,stamp,stamp).run();
+  const row=await env.DB.prepare("SELECT id FROM social_accounts WHERE owner_user_id=? AND platform='shopee_affiliate' AND external_account_id=?").bind(user.id,check.app_id).first();
+  await audit(env,user.id,"shopee_affiliate_connected","account",row?.id||null,user.email,{app_id:maskedAppId(check.app_id),mode:"read_only"});
+  return {status:200,body:{id:row?.id||null,platform:"shopee_affiliate",connected:true,account_name:name,verified_at:stamp}};
+ } catch(e) {
+  const message=safeText(e?.message||"Shopee Affiliate check failed",240);
+  await audit(env,user.id,"shopee_affiliate_connect_failed","integration","shopee_affiliate",user.email,{error:message});
+  return {status:502,body:{connected:false,error:message}};
+ }
+}
+async function verifyShopeeAffiliateAccount(env,user,account) {
+ try {
+  if(account.status!=="connected") throw new Error("Shopee Affiliate account is not connected");
+  const check=await shopeeAffiliateCheck(env);
+  if(check.app_id!==String(account.external_account_id)) throw new Error("Worker AppID changed; connect Shopee Affiliate again");
+  const stamp=now(),meta={...JSON.parse(account.page_tasks_json||"{}"),verified_at:stamp};
+  await env.DB.prepare("UPDATE social_accounts SET page_tasks_json=?,updated_at=? WHERE id=?").bind(JSON.stringify(meta),stamp,account.id).run();
+  await audit(env,user.id,"shopee_affiliate_verified","account",account.id,user.email,{app_id:maskedAppId(check.app_id)});
+  return {status:200,body:{id:account.id,platform:"shopee_affiliate",connected:true,account_name:account.account_name,verified_at:stamp}};
+ } catch(e) {
+  const message=safeText(e?.message||"Shopee Affiliate check failed",240);
+  // Only credential problems mark the account; transient Shopee errors (system/rate limit) keep it connected.
+  if(account.status==="connected"&&/ 10020:|AppID changed|not configured/.test(message)) await env.DB.prepare("UPDATE social_accounts SET status='error',updated_at=? WHERE id=?").bind(now(),account.id).run();
+  await audit(env,user.id,"shopee_affiliate_verify_failed","account",account.id,user.email,{error:message});
+  return {status:502,body:{id:account.id,connected:false,error:message}};
+ }
+}
+async function verifyAccount(env,user,accountId) {
+ const account=await env.DB.prepare("SELECT id,platform,external_account_id,account_name,status,page_tasks_json FROM social_accounts WHERE id=? AND owner_user_id=?").bind(accountId,user.id).first();
+ if(account?.platform==="shopee_affiliate") return verifyShopeeAffiliateAccount(env,user,account);
+ return verifyTikTokAccount(env,user,accountId);
+}
 export function accountReadiness(account,scopes,pageTasks) {
  if(account.platform==="facebook") return facebookPublishReadiness(scopes,pageTasks);
  if(account.platform==="tiktok") return {ready:false,missing:["TikTok publishing is not enabled (connection only)"]};
+ if(account.platform==="shopee_affiliate") return {ready:false,missing:["Shopee Affiliate is connected read-only (no posting or transactions)"]};
  return {ready:false,missing:["adapter not enabled"]};
 }
 // ---- "แอดมินโซเชียล" auto-like: the connected Page likes its own posts only ----
@@ -687,7 +760,7 @@ async function handle(request,env) {
   const users=await env.DB.prepare("SELECT COUNT(*) n FROM app_users").first();
   const {results:facebookAccounts=[]}=await env.DB.prepare("SELECT scopes_json,page_tasks_json FROM social_accounts WHERE platform='facebook' AND status='connected'").all();
   const publishReadyAccounts=facebookAccounts.filter(a=>facebookPublishReadiness(JSON.parse(a.scopes_json||"[]"),JSON.parse(a.page_tasks_json||"[]")).ready).length;
-  return json({service:"Alpha Centauri Social Commerce Cloud API",status:"online",mode:"cloud",setup_ready:setup,admin_initialized:(users?.n||0)>0,publishing_enabled:publishReadyAccounts>0,publishing_adapter_enabled:true,publishing_adapter:"facebook_page_photo",publishing_formats:["text","photo"],publish_ready_accounts:publishReadyAccounts,meta_oauth_configured:metaAnyConfigured(env),meta_instagram_configured:metaConfigured(env,"instagram"),meta_facebook_configured:metaConfigured(env,"facebook"),meta_webhook_configured:webhookConfigured(env),meta_redirect_uri:env.META_REDIRECT_URI||null,tiktok_oauth_configured:tiktokConfigured(env),tiktok_redirect_uri:tiktokRedirectUri(env),tiktok_scopes:tiktokScopes(env),tiktok_publishing_enabled:false,platforms:Object.fromEntries(PLATFORMS.map(p=>[p,p==="instagram"?(metaConfigured(env,"instagram")?"oauth_ready":"oauth_not_configured"):p==="facebook"?(metaConfigured(env,"facebook")?"oauth_ready":"oauth_not_configured"):p==="tiktok"?(tiktokConfigured(env)?"oauth_ready":"oauth_not_configured"):"oauth_not_configured"]))},200,cors(request));
+  return json({service:"Alpha Centauri Social Commerce Cloud API",status:"online",mode:"cloud",setup_ready:setup,admin_initialized:(users?.n||0)>0,publishing_enabled:publishReadyAccounts>0,publishing_adapter_enabled:true,publishing_adapter:"facebook_page_photo",publishing_formats:["text","photo"],publish_ready_accounts:publishReadyAccounts,meta_oauth_configured:metaAnyConfigured(env),meta_instagram_configured:metaConfigured(env,"instagram"),meta_facebook_configured:metaConfigured(env,"facebook"),meta_webhook_configured:webhookConfigured(env),meta_redirect_uri:env.META_REDIRECT_URI||null,tiktok_oauth_configured:tiktokConfigured(env),tiktok_redirect_uri:tiktokRedirectUri(env),tiktok_scopes:tiktokScopes(env),tiktok_publishing_enabled:false,shopee_affiliate_configured:shopeeAffiliateConfigured(env),shopee_affiliate_endpoint:shopeeAffiliateEndpoint(env),shopee_affiliate_mode:"read_only",platforms:Object.fromEntries(PLATFORMS.map(p=>[p,p==="instagram"?(metaConfigured(env,"instagram")?"oauth_ready":"oauth_not_configured"):p==="facebook"?(metaConfigured(env,"facebook")?"oauth_ready":"oauth_not_configured"):p==="tiktok"?(tiktokConfigured(env)?"oauth_ready":"oauth_not_configured"):p==="shopee_affiliate"?(shopeeAffiliateConfigured(env)?"api_ready":"awaiting_api_approval"):"oauth_not_configured"]))},200,cors(request));
  }
  if(method==="POST"&&path==="/auth/bootstrap") {
   if(!env.BOOTSTRAP_KEY||(request.headers.get("Authorization")||"").replace(/^Bootstrap\s+/i,"")!==env.BOOTSTRAP_KEY) return json({error:"Invalid bootstrap key"},403,cors(request));
@@ -731,8 +804,9 @@ async function handle(request,env) {
   await env.DB.prepare("INSERT INTO oauth_states(state_hash,owner_user_id,platform,expires_at,created_at) VALUES(?,?,?,?,?)").bind(await sha(state),user.id,"tiktok",expiry,stamp).run();
   return json({authorization_url:buildTikTokAuthorizationUrl(env,state),expires_at:expiry,redirect_uri:tiktokRedirectUri(env),platform:"tiktok",scopes:tiktokScopes(env)},200,cors(request));
  }
- const tiktokVerify=path.match(/^\/accounts\/([a-zA-Z0-9_-]+)\/verify$/);
- if(method==="POST"&&tiktokVerify) { const r=await verifyTikTokAccount(env,user,tiktokVerify[1]); return json(r.body,r.status,cors(request)); }
+ if(method==="POST"&&path==="/affiliate/shopee/connect") { const r=await connectShopeeAffiliate(env,user); return json(r.body,r.status,cors(request)); }
+ const accountVerify=path.match(/^\/accounts\/([a-zA-Z0-9_-]+)\/verify$/);
+ if(method==="POST"&&accountVerify) { const r=await verifyAccount(env,user,accountVerify[1]); return json(r.body,r.status,cors(request)); }
  if(method==="GET"&&path==="/accounts") {
   const {results=[]}=await env.DB.prepare("SELECT id,platform,external_account_id,account_name,profile_picture_url,status,scopes_json,page_tasks_json,token_expires_at,created_at,updated_at FROM social_accounts WHERE owner_user_id=? ORDER BY platform,account_name").bind(user.id).all();
   return json({accounts:results.map(a=>{const scopes=JSON.parse(a.scopes_json||"[]"),meta=JSON.parse(a.page_tasks_json||"[]"),page_tasks=Array.isArray(meta)?meta:[];const readiness=accountReadiness(a,scopes,page_tasks);const {page_tasks_json,...rest}=a;return {...rest,page_tasks_json:Array.isArray(meta)?page_tasks_json:"[]",scopes,page_tasks,connection:Array.isArray(meta)?null:{verified_at:meta.verified_at||null,refresh_expires_at:meta.refresh_expires_at||null},publish_ready:readiness.ready,publish_blockers:readiness.missing};})},200,cors(request));
