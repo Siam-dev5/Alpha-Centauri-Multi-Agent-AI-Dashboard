@@ -855,6 +855,7 @@
           <button class="sc-tab rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-300" onclick="switchSocialTab('access')">การตั้งค่า API</button>
           <button class="sc-tab rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-300" onclick="switchSocialTab('autolike')">แอดมินโซเชียล · Auto-Like</button>
           <button class="sc-tab rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-300" onclick="switchSocialTab('shop')">ร้านค้า Shopee</button>
+          <button class="sc-tab rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-300" onclick="switchSocialTab('secretary')">เลขาส่วนตัว · Leads</button>
           <span id="sc-gateway-state" class="ml-auto self-center text-xs text-amber-300">กำลังตรวจสอบ Cloud API…</span>
         </div>
         <div id="sc-panel" class="min-h-[360px] overflow-y-auto p-4"></div>
@@ -989,7 +990,7 @@
         function switchSocialTab(tab) {
             scActiveTab = tab;
             document.querySelectorAll('.sc-tab').forEach((button, index) => {
-                const active = ['accounts','content','access','autolike','shop'][index] === tab;
+                const active = ['accounts','content','access','autolike','shop','secretary'][index] === tab;
                 button.className = 'sc-tab rounded-lg border px-3 py-2 text-xs ' +
                     (active ? 'border-fuchsia-400/40 bg-fuchsia-500/15 text-fuchsia-200' : 'border-slate-700 text-slate-300');
             });
@@ -999,6 +1000,32 @@
             if (tab === 'access') renderSocialAccess();
             if (tab === 'autolike') renderAutoLike();
             if (tab === 'shop') renderShopeeSeller();
+            if (tab === 'secretary') renderSecretary();
+        }
+        // "เลขาส่วนตัว": people who commented the CTA keyword under workflow posts, and the one Private Reply each may get.
+        async function renderSecretary(note) {
+            const panel = document.getElementById('sc-panel');
+            panel.innerHTML = '<p class="text-sm text-slate-400">กำลังโหลด…</p>';
+            try {
+                const v = await scRequest('/secretary');
+                const modeLabel = {off:'ปิดอยู่ (ไม่อ่านคอมเมนต์ ไม่ส่งข้อความ)', dry_run:'โหมดจำลอง (บันทึกผู้สนใจ ไม่ส่งข้อความ)', live:'ส่งข้อความจริง'}[v.mode] || v.mode;
+                const pages = (v.pages || []).map(p => '<li>' + escapeHtml(p.name) + ': ' + (p.ready ? '<span class="text-emerald-300">พร้อมส่ง</span>' : '<span class="text-amber-300">ยังขาด ' + escapeHtml(p.missing.join(', ')) + '</span>') + '</li>').join('');
+                const statusTh = {pending:'รอส่ง', sending:'กำลังส่ง', sent:'ส่งแล้ว', failed:'ไม่สำเร็จ', unknown:'ไม่ทราบผล', skipped:'ข้าม'};
+                const rows = (v.leads || []).map(l => '<tr class="border-t border-slate-800"><td class="py-1 pr-2">' + escapeHtml(new Date(l.created_at).toLocaleString('th-TH')) + '</td><td class="pr-2">' + escapeHtml(l.commenter_name || '-') + '</td><td class="pr-2">' + escapeHtml(l.comment_text || '') + '</td><td class="pr-2">' + escapeHtml(statusTh[l.status] || l.status) + (l.reason ? '<span class="block text-[10px] text-slate-500">' + escapeHtml(l.reason) + '</span>' : '') + '</td></tr>').join('');
+                panel.innerHTML = '<p class="mb-3 text-xs text-slate-400">เลขาส่วนตัวตรวจคอมเมนต์ใต้โพสต์ของ Workflow ภายใน 7 วัน คนที่คอมเมนต์ "' + escapeHtml(v.keyword) + '" ได้รับข้อความ Messenger ได้ 1 ครั้งต่อคอมเมนต์ (Private Reply) · บันทึกครั้งเดียวกันส่งซ้ำ</p>' +
+                    (note ? '<p class="mb-3 rounded-lg bg-slate-900 p-2 text-xs text-slate-300">' + escapeHtml(note) + '</p>' : '') +
+                    '<div class="rounded-xl border border-slate-700 bg-slate-950/50 p-4 text-xs text-slate-300"><p>สถานะ: <b>' + escapeHtml(modeLabel) + '</b>' + (v.test_allowlist ? ' · จำกัดเฉพาะบัญชีทดสอบ' : '') + '</p><p class="mt-1">ข้อความที่อนุมัติแล้ว: ' + (v.message_configured ? 'ตั้งค่าแล้ว' : 'ยังไม่ตั้งค่า') + '</p><ul class="mt-2 space-y-1">' + pages + '</ul>' +
+                    (v.schema_ready ? '' : '<p class="mt-2 text-amber-300">ฐานข้อมูลยังไม่มีตาราง comment_leads (migration 0010)</p>') +
+                    (v.mode !== 'off' && v.schema_ready ? '<button onclick="scanSecretary()" class="mt-3 rounded-lg border border-sky-400/40 bg-sky-500/10 px-3 py-2 text-xs text-sky-200">ตรวจคอมเมนต์ตอนนี้</button>' : '') + '</div>' +
+                    '<div class="mt-4 rounded-xl border border-slate-700 bg-slate-950/50 p-4"><h4 class="mb-2 text-sm font-semibold text-white">ผู้สนใจ (' + (v.leads || []).length + ')</h4>' + (rows ? '<table class="w-full text-left text-xs text-slate-300"><thead class="text-slate-500"><tr><th>เวลา</th><th>ผู้คอมเมนต์</th><th>คอมเมนต์</th><th>สถานะ</th></tr></thead><tbody>' + rows + '</tbody></table>' : '<p class="text-xs text-slate-500">ยังไม่มีผู้คอมเมนต์ที่ตรงเงื่อนไข</p>') + '</div>';
+            } catch (error) { panel.innerHTML = '<p class="text-sm text-rose-300">โหลดเลขาส่วนตัวไม่ได้: ' + escapeHtml(error.message) + '</p>'; }
+        }
+        async function scanSecretary() {
+            try {
+                const r = await scRequest('/secretary/scan', {method:'POST', body:'{}'});
+                const s = (r.results || []).map(x => x.error ? x.error : ('โพสต์ ' + x.scanned_posts + ' · ผู้สนใจใหม่ ' + x.new_leads + ' · ส่งแล้ว ' + x.sent + ' · ข้าม ' + x.skipped + ' · ไม่สำเร็จ ' + x.failed)).join(' | ');
+                await renderSecretary('ผลการตรวจ: ' + (s || 'ไม่มีเพจที่ตรวจ'));
+            } catch (error) { await renderSecretary('ตรวจไม่สำเร็จ: ' + error.message); }
         }
         // Shopee Seller (ร้านค้าของผู้ใช้) module: read-only shop connection, separate from Shopee Affiliate.
         async function renderShopeeSeller() {

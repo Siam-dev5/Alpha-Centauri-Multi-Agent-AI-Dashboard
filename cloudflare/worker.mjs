@@ -296,6 +296,119 @@ export function accountReadiness(account,scopes,pageTasks) {
  if(account.platform==="shopee_affiliate") return {ready:false,missing:["Shopee Affiliate is connected read-only (no posting or transactions)"]};
  return {ready:false,missing:["adapter not enabled"]};
 }
+// ---- "เลขาส่วนตัว" (Personal Secretary): one Facebook Private Reply to people who comment the CTA keyword. ----
+// Docs: developers.facebook.com/docs/messenger-platform/discovery/private-replies
+//  POST /{page-id}/messages {recipient:{comment_id}, message:{text}} · needs pages_messaging + Page task MESSAGING
+//  · only one private reply per comment · only within 7 days of the comment.
+// Safety: COMMENT_DM_MODE is "off" unless set; "dry_run" records leads without sending; "live" sends.
+// COMMENT_DM_ALLOW_IDS (comma-separated commenter IDs) limits live sends to those people, e.g. for a test.
+// Only comments under posts published by the creative workflow in the last 7 days are read.
+// A lead row is unique per comment and claimed before sending, so a comment is never messaged twice.
+const DM_WINDOW_MS=7*86400000, DM_SAFETY_MS=3600000, DM_MAX_SENDS_PER_RUN=10, DM_MAX_POSTS=30;
+export const commentDmMode=(env)=>{ const m=String(env.COMMENT_DM_MODE||"off").trim().toLowerCase(); return ["dry_run","live"].includes(m)?m:"off"; };
+export const commentDmKeyword=(env)=>String(env.COMMENT_DM_KEYWORD||"สนใจ").trim()||"สนใจ";
+const commentDmAllowIds=(env)=>String(env.COMMENT_DM_ALLOW_IDS||"").split(/[\s,]+/).map(s=>s.trim()).filter(Boolean);
+const POLITE=/(ครับ|คับ|ค่ะ|คะ|ค่า|จ้า|จ้ะ|นะ|ค่ะ)+$/;
+// True when the comment is the keyword itself, optionally with spaces, punctuation, emoji or a polite particle.
+export function isKeywordComment(text,keyword="สนใจ") {
+ const cleaned=String(text||"").normalize("NFC").replace(/[\s\p{P}\p{S}​-‍️]/gu,"");
+ if(!cleaned) return false;
+ return cleaned===keyword||(cleaned.startsWith(keyword)&&POLITE.test(cleaned.slice(keyword.length))&&cleaned.slice(keyword.length).replace(POLITE,"")==="");
+}
+export function commentDmReadiness(env,scopes=[],tasks=[]) {
+ const granted=new Set(scopes),assigned=new Set(tasks),missing=[];
+ if(!granted.has("pages_read_user_content")) missing.push("pages_read_user_content");
+ if(!granted.has("pages_messaging")) missing.push("pages_messaging");
+ if(!(assigned.has("MESSAGING")||assigned.has("MANAGE"))) missing.push("Page task MESSAGING");
+ if(!String(env.COMMENT_DM_TEXT||"").trim()) missing.push("COMMENT_DM_TEXT (approved message)");
+ return {ready:missing.length===0,missing};
+}
+const isMissingTable=(e)=>/no such table/i.test(String(e?.message||e));
+async function sendPrivateReply(env,pageId,commentId,text,token) {
+ const body=new FormData();
+ body.set("access_token",token);
+ const proof=await appSecretProof(env,token); if(proof) body.set("appsecret_proof",proof);
+ body.set("recipient",JSON.stringify({comment_id:commentId}));
+ body.set("message",JSON.stringify({text}));
+ const res=await fetch("https://graph.facebook.com/"+graphVersion(env)+"/"+encodeURIComponent(pageId)+"/messages",{method:"POST",body,headers:{Accept:"application/json"}});
+ const data=await res.json().catch(()=>({}));
+ if(!res.ok||data.error||!data.message_id) return {ok:false,error:safeText(data.error?.message||"Facebook did not confirm the message",300)};
+ return {ok:true,message_id:String(data.message_id)};
+}
+export async function runCommentSecretaryForAccount(env,account,actor) {
+ const mode=commentDmMode(env),keyword=commentDmKeyword(env),allow=commentDmAllowIds(env);
+ const summary={account_id:account.id,mode,scanned_posts:0,new_leads:0,sent:0,failed:0,unknown:0,skipped:0};
+ if(mode==="off") return {...summary,error:"COMMENT_DM_MODE is off"};
+ if(account.status!=="connected"||!account.encrypted_access_token) return {...summary,error:"Page not connected"};
+ const scopes=JSON.parse(account.scopes_json||"[]"),tasks=JSON.parse(account.page_tasks_json||"[]");
+ if(!new Set(scopes).has("pages_read_user_content")) return {...summary,error:"Missing pages_read_user_content"};
+ const token=await decrypt(account.encrypted_access_token,env),pageId=String(account.external_account_id);
+ const since=new Date(Date.now()-DM_WINDOW_MS).toISOString();
+ const {results:posts=[]}=await env.DB.prepare("SELECT DISTINCT p.external_post_id post_id FROM publish_records p JOIN workflow_runs r ON r.content_id=p.content_id WHERE p.account_id=? AND p.status='published' AND p.external_post_id IS NOT NULL AND p.updated_at>=? ORDER BY p.updated_at DESC LIMIT ?").bind(account.id,since,DM_MAX_POSTS).all();
+ for(const {post_id} of posts) {
+  let comments=[];
+  try { comments=(await graphGet(env,post_id+"/comments",{fields:"id,message,from{id,name},created_time",filter:"stream",order:"reverse_chronological",limit:100,access_token:token})).data||[]; }
+  catch(e) { summary.error=safeText(e?.message||"Could not read comments",300); continue; }
+  summary.scanned_posts++;
+  for(const c of comments) {
+   if(!c?.id||!isKeywordComment(c.message,keyword)) continue;
+   if(c.from?.id&&String(c.from.id)===pageId) continue;
+   const r=await env.DB.prepare("INSERT OR IGNORE INTO comment_leads(id,owner_user_id,account_id,page_id,post_id,comment_id,commenter_id,commenter_name,comment_text,comment_created_at,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,'pending',?,?)")
+    .bind(random(12),account.owner_user_id,account.id,pageId,String(post_id),String(c.id),c.from?.id?String(c.from.id):null,c.from?.name?safeText(c.from.name,120):null,safeText(c.message,300),c.created_time||null,now(),now()).run();
+   if((r.meta?.changes||0)===1) summary.new_leads++;
+  }
+ }
+ if(mode!=="live") return summary;
+ const readiness=commentDmReadiness(env,scopes,tasks);
+ if(!readiness.ready) return {...summary,error:"Not ready to send: "+readiness.missing.join(", ")};
+ const text=safeText(String(env.COMMENT_DM_TEXT).trim(),1900);
+ const {results:pending=[]}=await env.DB.prepare("SELECT id,post_id,comment_id,commenter_id,comment_created_at FROM comment_leads WHERE account_id=? AND status='pending' ORDER BY created_at LIMIT ?").bind(account.id,DM_MAX_SENDS_PER_RUN).all();
+ for(const lead of pending) {
+  const age=Date.now()-Date.parse(lead.comment_created_at||0);
+  const already=lead.commenter_id?await env.DB.prepare("SELECT id FROM comment_leads WHERE account_id=? AND post_id=? AND commenter_id=? AND id<>? AND status IN ('sending','sent','unknown','failed')").bind(account.id,lead.post_id,lead.commenter_id,lead.id).first():null;
+  const skip=!(age>=0&&age<DM_WINDOW_MS-DM_SAFETY_MS)?"Comment is older than Facebook's 7-day private-reply window"
+   :(allow.length&&!allow.includes(String(lead.commenter_id||"")))?"Commenter is not on COMMENT_DM_ALLOW_IDS (test allowlist)"
+   :already?"This person was already messaged (or attempted) for this post":null;
+  if(skip) { await env.DB.prepare("UPDATE comment_leads SET status='skipped',reason=?,updated_at=? WHERE id=? AND status='pending'").bind(skip,now(),lead.id).run(); summary.skipped++; continue; }
+  const claim=await env.DB.prepare("UPDATE comment_leads SET status='sending',updated_at=? WHERE id=? AND status='pending'").bind(now(),lead.id).run();
+  if((claim.meta?.changes||0)!==1) continue;
+  let result;
+  try { result=await sendPrivateReply(env,pageId,lead.comment_id,text,token); }
+  catch {
+   await env.DB.prepare("UPDATE comment_leads SET status='unknown',reason=?,updated_at=? WHERE id=?").bind("Network error after the send request; not retried",now(),lead.id).run();
+   await audit(env,account.owner_user_id,"comment_dm_unknown","comment",lead.comment_id,actor,{account_id:account.id});
+   summary.unknown++; continue;
+  }
+  if(result.ok) {
+   await env.DB.prepare("UPDATE comment_leads SET status='sent',message_id=?,reason=NULL,sent_at=?,updated_at=? WHERE id=?").bind(result.message_id,now(),now(),lead.id).run();
+   await audit(env,account.owner_user_id,"comment_dm_sent","comment",lead.comment_id,actor,{account_id:account.id,message_id:result.message_id});
+   summary.sent++;
+  } else {
+   await env.DB.prepare("UPDATE comment_leads SET status='failed',reason=?,updated_at=? WHERE id=?").bind(result.error,now(),lead.id).run();
+   await audit(env,account.owner_user_id,"comment_dm_failed","comment",lead.comment_id,actor,{account_id:account.id,error:result.error});
+   summary.failed++;
+  }
+ }
+ return summary;
+}
+export async function runCommentSecretary(env,ownerId=null,actor="comment_dm_cron") {
+ if(commentDmMode(env)==="off") return [];
+ const {results=[]}=await env.DB.prepare("SELECT id,owner_user_id,external_account_id,account_name,status,scopes_json,page_tasks_json,encrypted_access_token FROM social_accounts WHERE platform='facebook' AND status='connected'"+(ownerId?" AND owner_user_id=?":"")).bind(...(ownerId?[ownerId]:[])).all();
+ const out=[];
+ for(const a of results) {
+  try { out.push(await runCommentSecretaryForAccount(env,a,actor)); }
+  catch(e) { out.push({account_id:a.id,error:isMissingTable(e)?"Database migration 0010_comment_leads is not applied":safeText(e?.message||"failed",300)}); }
+ }
+ return out;
+}
+async function commentSecretaryView(env,user) {
+ const {results:accounts=[]}=await env.DB.prepare("SELECT id,account_name,scopes_json,page_tasks_json FROM social_accounts WHERE owner_user_id=? AND platform='facebook' AND status='connected'").bind(user.id).all();
+ const view={mode:commentDmMode(env),keyword:commentDmKeyword(env),message_configured:!!String(env.COMMENT_DM_TEXT||"").trim(),test_allowlist:commentDmAllowIds(env).length>0,
+  pages:accounts.map(a=>({id:a.id,name:a.account_name,...commentDmReadiness(env,JSON.parse(a.scopes_json||"[]"),JSON.parse(a.page_tasks_json||"[]"))})),schema_ready:true,leads:[]};
+ try { view.leads=(await env.DB.prepare("SELECT id,post_id,comment_id,commenter_name,comment_text,comment_created_at,status,reason,sent_at,created_at FROM comment_leads WHERE owner_user_id=? ORDER BY created_at DESC LIMIT 100").bind(user.id).all()).results||[]; }
+ catch(e) { if(!isMissingTable(e)) throw e; view.schema_ready=false; }
+ return view;
+}
 // ---- "แอดมินโซเชียล" auto-like: the connected Page likes its own posts only ----
 const AUTO_LIKE_MAX_PER_RUN=5, AUTO_LIKE_SCAN_LIMIT=10, AUTO_LIKE_MAX_BACKFILL=5;
 export function autoLikeReadiness(scopes=[],tasks=[]) {
@@ -852,6 +965,8 @@ async function handle(request,env) {
   if(!PLATFORMS.includes(b.platform)||!b.external_account_id||!b.account_name) return json({error:"OAuth-created account identity is required"},422,cors(request));
   return json({error:"Manual account creation is disabled; connect through verified OAuth or an approved affiliate adapter."},409,cors(request));
  }
+ if(method==="GET"&&path==="/secretary") return json(await commentSecretaryView(env,user),200,cors(request));
+ if(method==="POST"&&path==="/secretary/scan") { const results=await runCommentSecretary(env,user.id,user.email); return json({results,view:await commentSecretaryView(env,user)},200,cors(request)); }
  const accountMatch=path.match(/^\/accounts\/([a-zA-Z0-9_-]+)$/);
  if(method==="DELETE"&&accountMatch) {
   const a=await env.DB.prepare("SELECT id,platform,encrypted_access_token FROM social_accounts WHERE id=? AND owner_user_id=?").bind(accountMatch[1],user.id).first();
@@ -1059,5 +1174,6 @@ export default { async fetch(request,env) {
 async scheduled(event,env,ctx) {
  ctx.waitUntil(runScheduledAutoLike(env).then(r=>console.log("auto-like-cron",{accounts:r.length,results:r.map(x=>({liked:x.liked,failed:x.failed,queued:x.queued,error:x.error||null}))})).catch(e=>console.error("auto-like-cron",{message:safeText(e?.message||"unknown",200)})));
  // Resume creative workflows whose browser driver went away (stale, unlocked, still running).
+ ctx.waitUntil(runCommentSecretary(env).then(r=>r.length&&console.log("comment-dm-cron",{results:r})).catch(e=>console.error("comment-dm-cron",{message:safeText(e?.message||"unknown",200)})));
  if(env.AI) ctx.waitUntil(runScheduledWorkflows(env).then(n=>n&&console.log("workflow-cron",{resumed:n})).catch(e=>console.error("workflow-cron",{message:safeText(e?.message||"unknown",200)})));
 }};
