@@ -53,13 +53,6 @@ This checklist identifies owner actions required before real integrations can be
 - Signing per Shopee docs: `Authorization: SHA256 Credential={AppId}, Timestamp={unix}, Signature=sha256(AppId+Timestamp+Payload+Secret)`; timestamp must be within 10 minutes of Shopee's clock.
 - No short links, conversion reports, orders, listings or other transactions are called by this adapter. The secret is never stored in D1 or logs.
 
-## Shopee Seller (shop) — separate module
-- Distinct from Shopee Affiliate: uses Shopee Open Platform v2 (open.shopee.com) shop authorization, its own table `shopee_seller_shops` (migration 0009) and its own Dashboard card.
-- Read-only: the Worker only calls `/api/v2/shop/get_shop_info` (allowlist `SHOPEE_SELLER_READ_ONLY_PATHS`) plus the token get/refresh endpoints. No product, order, logistics or payment calls exist.
-- Needs a Shopee Open Platform app (Partner ID + Partner Key) for the shop's account, with the redirect domain `social-api.siamhrbp.com` registered. Then set Worker secrets `SHOPEE_PARTNER_ID`, `SHOPEE_PARTNER_KEY` (optional `SHOPEE_ENV=sandbox` for the test-stable host).
-- Callback: `https://social-api.siamhrbp.com/api/social-commerce/oauth/shopee-seller/callback`. The shop owner authorizes in Shopee's page; tokens are encrypted at rest; access tokens refresh automatically (refresh tokens last 30 days, so re-authorization is needed if unused for 30 days).
-- Disconnect in the Dashboard clears stored tokens; permanent revocation is done by the shop owner in Shopee Seller Centre.
-
 ## Lazada Affiliate
 - Confirm the current Thailand Affiliate/Publisher API program and account eligibility with Lazada's official affiliate partner portal. A Lazada Open Platform community answer states that Affiliate API onboarding is guided through the Lazada Affiliate platform, rather than by creating a normal Seller Open Platform app; confirm this directly with partner support before implementation.
 - Lazada Open Platform Seller APIs are intended for professional sellers managing their stores and are not proof of Affiliate API access.
