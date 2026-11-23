@@ -19,6 +19,19 @@ This checklist identifies owner actions required before real integrations can be
 - Upload endpoint: https://developers.google.com/youtube/v3/docs/videos/insert
 
 ## TikTok
+### Account connection (Login Kit for Web) — implemented in the Cloud Worker
+- In the TikTok for Developers app, add the **Login Kit** product with scope `user.info.basic`.
+- Register this exact Web redirect URI (https, no query string):
+  `https://social-api.siamhrbp.com/api/social-commerce/oauth/tiktok/callback`
+- Store the app credentials only as Cloudflare Worker secrets:
+  `wrangler secret put TIKTOK_CLIENT_KEY` and `wrangler secret put TIKTOK_CLIENT_SECRET`.
+  Optional plain variables: `TIKTOK_REDIRECT_URI` (defaults to the URI above) and `TIKTOK_SCOPES` (defaults to `user.info.basic`).
+- `GET /health` reports `platforms.tiktok = "oauth_ready"` once both secrets exist; the Dashboard then enables **เชื่อมต่อ TikTok · Login Kit**.
+- Endpoints: `POST /oauth/tiktok/start`, `GET /oauth/tiktok/callback`, `POST /accounts/{id}/verify` (refreshes the 2-hour access token with the rotating refresh token and reads the live profile), `DELETE /accounts/{id}` (revokes the token).
+- Tokens are AES-GCM encrypted at rest. No TikTok posting endpoint is called by this adapter.
+- Docs: https://developers.tiktok.com/doc/login-kit-web, https://developers.tiktok.com/doc/oauth-user-access-token-management
+
+### Publishing (not enabled)
 - Create a TikTok for Developers app and add Content Posting API.
 - Request and obtain approval for video.publish and obtain each creator's authorization.
 - Complete the Content Posting API audit to remove private-only restrictions for unaudited clients.

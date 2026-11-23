@@ -51,7 +51,7 @@ Affiliate marketing is the active business model. The user promotes third-party 
 - Phase E: end-to-end testing with real accounts, then production release.
 
 ## Current limitation
-Facebook Page image publishing is available only for OAuth-connected Pages that pass live permission and Page-task checks. Existing accounts with empty permission metadata must reconnect after the permission-discovery fix. Instagram, YouTube, TikTok, Shopee Affiliate and Lazada Affiliate publishing/reporting remain disabled until their separate adapters and official access reviews are completed. A successful CI run is not a real-account publication test.
+Facebook Page image publishing is available only for OAuth-connected Pages that pass live permission and Page-task checks. Existing accounts with empty permission metadata must reconnect after the permission-discovery fix. TikTok accounts can be connected through Login Kit for Web (connection and live profile check only, see the platform access checklist). Instagram, YouTube, TikTok, Shopee Affiliate and Lazada Affiliate publishing/reporting remain disabled until their separate adapters and official access reviews are completed. A successful CI run is not a real-account publication test.
 
 ## "แอดมินโซเชียล" auto-like (Facebook Page)
 - The connected Page likes **its own posts only** through `POST /{post-id}/likes` with the Page access token (Graph API v27.0). Requires `pages_manage_engagement`, `pages_read_engagement` and the Page task `CREATE_CONTENT` (or `MANAGE`).
