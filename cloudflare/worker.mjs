@@ -438,6 +438,28 @@ async function wfEvent(env,runId,from,to,status,message,detail=null) {
   .bind(random(12),runId,row?.n||1,from,to,status,safeText(message,700),detail?JSON.stringify(detail).slice(0,6000):null,now()).run();
 }
 const wfImagePrompt=(p)=>safeText(p,900)+", professional social media visual, clean composition, high quality, no text, no letters, no words, no logos, no watermark";
+// Content guard for scheduled/routine commands (no schema change):
+//  [CID:<id>]  content ID — the same ID cannot start a new run while one is running or after one was published in the last 30 days.
+//  CTA "<word>" — the published caption must contain the word; when the AI leaves it out, a CTA line is appended.
+const WF_DUPLICATE_WINDOW_DAYS=30;
+export function wfDirectives(command) {
+ const text=String(command||"");
+ const cid=text.match(/\[CID:([A-Za-z0-9_-]{2,40})\]/);
+ const cta=text.match(/CTA\s*[:：]?\s*["“”'‘’]([^"“”'‘’\n]{1,40})["“”'‘’]/i);
+ return {cid:cid?cid[1]:null,cta:cta?cta[1].trim():null};
+}
+export function wfEnsureCta(caption,cta) {
+ const text=String(caption||"").trim();
+ if(!cta||text.includes(cta)) return {caption:text,added:false};
+ return {caption:text+"\n\n👉 คอมเมนต์ \""+cta+"\" ใต้โพสต์นี้",added:true};
+}
+async function wfDuplicateReason(env,userId,text,cid) {
+ const since=new Date(Date.now()-WF_DUPLICATE_WINDOW_DAYS*86400000).toISOString();
+ const {results=[]}=await env.DB.prepare("SELECT id,command,status,created_at FROM workflow_runs WHERE owner_user_id=? AND created_at>=? AND status IN ('running','completed')").bind(userId,since).all();
+ const hit=results.find(r=>(cid&&wfDirectives(r.command).cid===cid)||r.command===text);
+ if(!hit) return null;
+ return (cid?"Content ID "+cid:"คำสั่งเดียวกันนี้")+" ถูกใช้แล้วใน Run "+hit.id+" ("+hit.status+", "+hit.created_at+") · ไม่สร้างโพสต์ซ้ำภายใน "+WF_DUPLICATE_WINDOW_DAYS+" วัน";
+}
 export async function wfCreateRun(env,user,command) {
  const text=safeText(String(command||"").trim(),1000);
  if(text.length<4) return {error:"Command is too short",status:422};
@@ -446,13 +468,14 @@ export async function wfCreateRun(env,user,command) {
  const named=ready.filter(a=>text.toLowerCase().includes(String(a.account_name).toLowerCase()));
  const target=named.length===1?named[0]:ready.length===1?ready[0]:null;
  const id=random(12),stamp=now();
- const blocked=!target?(ready.length?"พบ Facebook Page ที่พร้อมโพสต์หลายเพจ กรุณาระบุชื่อเพจในคำสั่ง: "+ready.map(a=>a.account_name).join(", "):"ยังไม่มี Facebook Page ที่เชื่อมต่อและพร้อมโพสต์"):null;
+ const duplicate=await wfDuplicateReason(env,user.id,text,wfDirectives(text).cid);
+ const blocked=duplicate?duplicate:!target?(ready.length?"พบ Facebook Page ที่พร้อมโพสต์หลายเพจ กรุณาระบุชื่อเพจในคำสั่ง: "+ready.map(a=>a.account_name).join(", "):"ยังไม่มี Facebook Page ที่เชื่อมต่อและพร้อมโพสต์"):null;
  await env.DB.prepare("INSERT INTO workflow_runs(id,owner_user_id,command,status,stage,target_account_id,error_message,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)")
-  .bind(id,user.id,text,target?"running":"blocked","created",target?target.id:null,blocked,stamp,stamp).run();
+  .bind(id,user.id,text,target&&!duplicate?"running":"blocked","created",target?target.id:null,blocked,stamp,stamp).run();
  await wfEvent(env,id,"user","master","RECEIVED","รับคำสั่งจากแชท: "+text);
- if(target) await wfEvent(env,id,"master","master","TARGET","เพจปลายทาง: "+target.account_name+" (Page ID "+target.external_account_id+")",{page_id:target.external_account_id});
+ if(target&&!duplicate) await wfEvent(env,id,"master","master","TARGET","เพจปลายทาง: "+target.account_name+" (Page ID "+target.external_account_id+")",{page_id:target.external_account_id});
  else await wfEvent(env,id,"master","user","BLOCKED",blocked);
- await audit(env,user.id,"workflow_started","workflow",id,user.email,{command:text,target_account_id:target?.id||null,blocked:!!blocked});
+ await audit(env,user.id,"workflow_started","workflow",id,user.email,{command:text,target_account_id:target?.id||null,blocked:!!blocked,duplicate:!!duplicate});
  return {id};
 }
 async function wfStep(env,run,actor) {
@@ -476,6 +499,10 @@ async function wfStep(env,run,actor) {
    "คำสั่งผู้ใช้: "+run.command+"\nแผนจาก Master Bot: "+JSON.stringify(plan),
    o=>["concept","caption","cover_prompt","illustration_prompt","banner_prompt"].every(k=>typeof o[k]==="string"&&o[k].trim())&&o.caption.length>=20);
   c.caption=safeText(String(c.caption).replace(/```/g,"").trim(),2200);
+  const cta=wfDirectives(run.command).cta;
+  const ensured=wfEnsureCta(c.caption,cta);
+  c.caption=safeText(ensured.caption,2200);
+  if(cta) c.cta={word:cta,added_by_guard:ensured.added};
   if(Array.isArray(c.script)) c.script=c.script.join("\n");
   await env.DB.prepare("UPDATE workflow_runs SET creative_json=?,stage='creative_done',updated_at=? WHERE id=?").bind(JSON.stringify(c),now(),run.id).run();
   await wfEvent(env,run.id,"creative","graphic","HANDOFF","Creative Bot ส่ง brief + prompt ภาพ 3 ชิ้นให้ Graphic Design · คอนเซปต์: "+safeText(c.concept,300),{concept:c.concept,script:safeText(c.script||"",1200),cover_prompt:c.cover_prompt,illustration_prompt:c.illustration_prompt,banner_prompt:c.banner_prompt});
