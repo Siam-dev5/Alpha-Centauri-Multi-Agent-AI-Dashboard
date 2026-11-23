@@ -287,6 +287,141 @@ async function verifyAccount(env,user,accountId) {
  if(account?.platform==="shopee_affiliate") return verifyShopeeAffiliateAccount(env,user,account);
  return verifyTikTokAccount(env,user,accountId);
 }
+// ---- Shopee Seller (shop) module: Shopee Open Platform v2 shop authorization + READ-ONLY shop info. ----
+// Kept separate from "shopee_affiliate" (Affiliate Open API, GraphQL): different program, credentials and table.
+// Docs: open.shopee.com/developer-guide/20 (authorization), /developer-guide/16 (signature), v2.shop.get_shop_info.
+// Safety: shopeeSellerGet() only calls paths in SHOPEE_SELLER_READ_ONLY_PATHS. There is no product, order,
+// logistics, payment or any other write call in this module.
+const SHOPEE_HOSTS={live:"https://partner.shopeemobile.com",sandbox:"https://partner.test-stable.shopeemobile.com"};
+const SHOPEE_SELLER_DEFAULT_REDIRECT="https://social-api.siamhrbp.com/api/social-commerce/oauth/shopee-seller/callback";
+export const SHOPEE_SELLER_READ_ONLY_PATHS=Object.freeze(["/api/v2/shop/get_shop_info"]);
+export const shopeeSellerEnv=(env)=>String(env.SHOPEE_ENV||"live").trim().toLowerCase()==="sandbox"?"sandbox":"live";
+export const shopeeSellerHost=(env)=>SHOPEE_HOSTS[shopeeSellerEnv(env)];
+export const shopeeSellerRedirectUri=(env)=>String(env.SHOPEE_REDIRECT_URI||SHOPEE_SELLER_DEFAULT_REDIRECT).trim();
+export const shopeeSellerConfigured=(env)=>/^\d+$/.test(String(env.SHOPEE_PARTNER_ID||"").trim())&&!!String(env.SHOPEE_PARTNER_KEY||"").trim();
+const SHOPEE_SELLER_TABLE_SQL="CREATE TABLE IF NOT EXISTS shopee_seller_shops (id TEXT PRIMARY KEY, owner_user_id TEXT NOT NULL REFERENCES app_users(id), shop_id TEXT NOT NULL, shop_name TEXT NOT NULL, region TEXT, shop_status TEXT, environment TEXT NOT NULL DEFAULT 'live', status TEXT NOT NULL DEFAULT 'connected' CHECK(status IN ('connected','disconnected','expired','error')), token_expires_at TEXT, refresh_expires_at TEXT, encrypted_access_token TEXT, encrypted_refresh_token TEXT, verified_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(owner_user_id, shop_id, environment))";
+// Additive and idempotent; mirrors migrations/0009_shopee_seller_shops.sql so the module works before that migration is applied.
+const ensureShopeeSellerTable=(env)=>env.DB.prepare(SHOPEE_SELLER_TABLE_SQL).run();
+async function hmacHex(key,message) {
+ const k=await crypto.subtle.importKey("raw",new TextEncoder().encode(key),{name:"HMAC",hash:"SHA-256"},false,["sign"]);
+ return [...new Uint8Array(await crypto.subtle.sign("HMAC",k,new TextEncoder().encode(message)))].map(b=>b.toString(16).padStart(2,"0")).join("");
+}
+// Public API: sign = HMAC-SHA256(partner_key, partner_id + path + timestamp). Shop API adds access_token + shop_id.
+export async function shopeeSellerSign(env,path,timestamp,accessToken="",shopId="") {
+ return hmacHex(String(env.SHOPEE_PARTNER_KEY).trim(),String(env.SHOPEE_PARTNER_ID).trim()+path+timestamp+accessToken+shopId);
+}
+const shopeeTimestamp=()=>Math.floor(Date.now()/1000);
+export async function buildShopeeSellerAuthorizationUrl(env,state,timestamp=shopeeTimestamp()) {
+ if(!shopeeSellerConfigured(env)) throw new Error("Shopee Open Platform partner is not configured");
+ const path="/api/v2/shop/auth_partner";
+ const redirect=new URL(shopeeSellerRedirectUri(env));
+ redirect.searchParams.set("state",state);
+ const url=new URL(shopeeSellerHost(env)+path);
+ url.searchParams.set("partner_id",String(env.SHOPEE_PARTNER_ID).trim());
+ url.searchParams.set("timestamp",String(timestamp));
+ url.searchParams.set("sign",await shopeeSellerSign(env,path,timestamp));
+ url.searchParams.set("redirect",redirect.toString());
+ return url.toString();
+}
+function shopeeSellerResultPage(status,message) { return oauthResultPage("ALPHA_CENTAURI_SHOPEE_SELLER_OAUTH","Shopee Seller",status,message); }
+const shopeeError=(data,response)=>safeText(data?.message||data?.error||response?.statusText||"unknown error",240);
+async function shopeeSellerTokenRequest(env,path,body) {
+ const timestamp=shopeeTimestamp(),url=new URL(shopeeSellerHost(env)+path);
+ url.searchParams.set("partner_id",String(env.SHOPEE_PARTNER_ID).trim());
+ url.searchParams.set("timestamp",String(timestamp));
+ url.searchParams.set("sign",await shopeeSellerSign(env,path,timestamp));
+ const response=await fetch(url.toString(),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...body,partner_id:Number(String(env.SHOPEE_PARTNER_ID).trim())})});
+ const data=await response.json().catch(()=>({}));
+ if(!response.ok||data.error||!data.access_token) throw new Error("Shopee token request failed: "+shopeeError(data,response));
+ return data;
+}
+// The only Shopee Shop API caller. Refuses every path that is not on the read-only allowlist.
+export async function shopeeSellerGet(env,path,accessToken,shopId,params={}) {
+ if(!SHOPEE_SELLER_READ_ONLY_PATHS.includes(path)) throw new Error("Blocked: "+path+" is not on the Shopee Seller read-only allowlist");
+ const timestamp=shopeeTimestamp(),url=new URL(shopeeSellerHost(env)+path);
+ for(const [k,v] of Object.entries({partner_id:String(env.SHOPEE_PARTNER_ID).trim(),timestamp:String(timestamp),access_token:accessToken,shop_id:String(shopId),...params})) url.searchParams.set(k,v);
+ url.searchParams.set("sign",await shopeeSellerSign(env,path,timestamp,accessToken,String(shopId)));
+ const response=await fetch(url.toString(),{method:"GET",headers:{Accept:"application/json"}});
+ const data=await response.json().catch(()=>({}));
+ if(!response.ok||data.error) throw new Error("Shopee "+path+" failed: "+shopeeError(data,response));
+ return data;
+}
+const shopeeExpiry=(seconds)=>Number(seconds)>0?new Date(Date.now()+Number(seconds)*1000).toISOString():null;
+const SHOPEE_REFRESH_TTL_SECONDS=30*24*3600;
+async function finishShopeeSellerOAuth(request,env,url) {
+ const state=url.searchParams.get("state"),code=url.searchParams.get("code"),shopId=url.searchParams.get("shop_id");
+ const stateHash=state?await sha(state):null;
+ const stateRow=stateHash?await env.DB.prepare("SELECT owner_user_id,platform,expires_at FROM oauth_states WHERE state_hash=? AND platform='shopee_seller'").bind(stateHash).first():null;
+ if(stateRow) await env.DB.prepare("DELETE FROM oauth_states WHERE state_hash=?").bind(stateHash).run();
+ if(!stateRow||stateRow.expires_at<=now()) return shopeeSellerResultPage("error","OAuth state is invalid or expired");
+ if(!code) return shopeeSellerResultPage("error","Shopee authorization was cancelled or no code was returned");
+ if(!shopId||!/^\d+$/.test(shopId)) return shopeeSellerResultPage("error","Only shop authorization is supported (no shop_id was returned)");
+ let stage="token_exchange";
+ try {
+  if(!shopeeSellerConfigured(env)) throw new Error("Shopee partner configuration is missing");
+  const userRow=await env.DB.prepare("SELECT id,email FROM app_users WHERE id=?").bind(stateRow.owner_user_id).first();
+  if(!userRow) throw new Error("Social Commerce user no longer exists");
+  const token=await shopeeSellerTokenRequest(env,"/api/v2/auth/token/get",{code,shop_id:Number(shopId)});
+  stage="shop_info";
+  const info=await shopeeSellerGet(env,"/api/v2/shop/get_shop_info",token.access_token,shopId);
+  stage="persist_shop";
+  await ensureShopeeSellerTable(env);
+  const stamp=now(),environment=shopeeSellerEnv(env),name=safeText(info.shop_name||"Shopee shop "+shopId,160);
+  await env.DB.prepare("INSERT INTO shopee_seller_shops(id,owner_user_id,shop_id,shop_name,region,shop_status,environment,status,token_expires_at,refresh_expires_at,encrypted_access_token,encrypted_refresh_token,verified_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,'connected',?,?,?,?,?,?,?) ON CONFLICT(owner_user_id,shop_id,environment) DO UPDATE SET shop_name=excluded.shop_name,region=excluded.region,shop_status=excluded.shop_status,status='connected',token_expires_at=excluded.token_expires_at,refresh_expires_at=excluded.refresh_expires_at,encrypted_access_token=excluded.encrypted_access_token,encrypted_refresh_token=excluded.encrypted_refresh_token,verified_at=excluded.verified_at,updated_at=excluded.updated_at")
+   .bind(random(16),userRow.id,shopId,name,safeText(info.region,8)||null,safeText(info.status,40)||null,environment,shopeeExpiry(token.expire_in),shopeeExpiry(SHOPEE_REFRESH_TTL_SECONDS),await encrypt(token.access_token,env),token.refresh_token?await encrypt(token.refresh_token,env):null,stamp,stamp,stamp).run();
+  await audit(env,userRow.id,"shopee_seller_shop_connected","shopee_seller_shop",shopId,userRow.email,{shop_name:name,region:info.region||null,environment});
+  return shopeeSellerResultPage("connected","Shopee Seller: "+name);
+ } catch(e) {
+  const diagnostic=safeText(e?.message||"unknown Shopee Seller OAuth error",300);
+  console.error("shopee-seller-oauth-callback",{stage,message:diagnostic});
+  try { await audit(env,stateRow.owner_user_id,"shopee_seller_oauth_failed","integration","shopee_seller","shopee-seller-oauth-callback",{stage,error:diagnostic}); } catch {}
+  return shopeeSellerResultPage("error","Shopee Seller connection failed during "+stage+". Diagnostic has been recorded for the system administrator.");
+ }
+}
+// Access tokens last ~4 hours; refresh tokens rotate and last 30 days.
+async function shopeeSellerAccessToken(env,shop) {
+ if(shop.status!=="connected"||!shop.encrypted_access_token) throw new Error("Shopee shop is not connected");
+ if(shop.token_expires_at&&Date.parse(shop.token_expires_at)>Date.now()+5*60000) return decrypt(shop.encrypted_access_token,env);
+ if(!shop.encrypted_refresh_token) throw new Error("Shopee access token expired and no refresh token is stored; reconnect the shop");
+ let token;
+ try { token=await shopeeSellerTokenRequest(env,"/api/v2/auth/access_token/get",{refresh_token:await decrypt(shop.encrypted_refresh_token,env),shop_id:Number(shop.shop_id)}); }
+ catch(e) { await env.DB.prepare("UPDATE shopee_seller_shops SET status='expired',updated_at=? WHERE id=?").bind(now(),shop.id).run(); throw e; }
+ await env.DB.prepare("UPDATE shopee_seller_shops SET encrypted_access_token=?,encrypted_refresh_token=?,token_expires_at=?,refresh_expires_at=?,updated_at=? WHERE id=?")
+  .bind(await encrypt(token.access_token,env),token.refresh_token?await encrypt(token.refresh_token,env):shop.encrypted_refresh_token,shopeeExpiry(token.expire_in),shopeeExpiry(SHOPEE_REFRESH_TTL_SECONDS),now(),shop.id).run();
+ return token.access_token;
+}
+const SHOPEE_SELLER_PUBLIC_COLUMNS="id,shop_id,shop_name,region,shop_status,environment,status,token_expires_at,refresh_expires_at,verified_at,created_at,updated_at";
+async function listShopeeSellerShops(env,user) {
+ await ensureShopeeSellerTable(env);
+ const {results=[]}=await env.DB.prepare("SELECT "+SHOPEE_SELLER_PUBLIC_COLUMNS+" FROM shopee_seller_shops WHERE owner_user_id=? ORDER BY shop_name").bind(user.id).all();
+ return results;
+}
+async function verifyShopeeSellerShop(env,user,id) {
+ await ensureShopeeSellerTable(env);
+ const shop=await env.DB.prepare("SELECT * FROM shopee_seller_shops WHERE id=? AND owner_user_id=?").bind(id,user.id).first();
+ if(!shop) return {status:404,body:{error:"Shopee shop not found"}};
+ if(!shopeeSellerConfigured(env)) return {status:503,body:{id:shop.id,connected:false,error:"Shopee Open Platform partner is not configured on the Cloudflare Worker (SHOPEE_PARTNER_ID / SHOPEE_PARTNER_KEY)"}};
+ try {
+  const info=await shopeeSellerGet(env,"/api/v2/shop/get_shop_info",await shopeeSellerAccessToken(env,shop),shop.shop_id);
+  const stamp=now();
+  await env.DB.prepare("UPDATE shopee_seller_shops SET shop_name=?,region=?,shop_status=?,verified_at=?,updated_at=? WHERE id=?").bind(safeText(info.shop_name||shop.shop_name,160),safeText(info.region,8)||shop.region,safeText(info.status,40)||shop.shop_status,stamp,stamp,shop.id).run();
+  await audit(env,user.id,"shopee_seller_shop_verified","shopee_seller_shop",shop.shop_id,user.email,{});
+  return {status:200,body:{id:shop.id,connected:true,shop_id:shop.shop_id,shop_name:info.shop_name||shop.shop_name,region:info.region||shop.region,shop_status:info.status||shop.shop_status,verified_at:stamp}};
+ } catch(e) {
+  const message=safeText(e?.message||"Shopee check failed",240);
+  await audit(env,user.id,"shopee_seller_shop_verify_failed","shopee_seller_shop",shop.shop_id,user.email,{error:message});
+  return {status:502,body:{id:shop.id,connected:false,error:message}};
+ }
+}
+// Removes the stored tokens locally. Revoking the authorization itself is done by the shop owner in Shopee Seller Centre.
+async function disconnectShopeeSellerShop(env,user,id) {
+ await ensureShopeeSellerTable(env);
+ const shop=await env.DB.prepare("SELECT id,shop_id FROM shopee_seller_shops WHERE id=? AND owner_user_id=?").bind(id,user.id).first();
+ if(!shop) return {status:404,body:{error:"Shopee shop not found"}};
+ await env.DB.prepare("UPDATE shopee_seller_shops SET status='disconnected',encrypted_access_token=NULL,encrypted_refresh_token=NULL,updated_at=? WHERE id=?").bind(now(),shop.id).run();
+ await audit(env,user.id,"shopee_seller_shop_disconnected","shopee_seller_shop",shop.shop_id,user.email,{});
+ return {status:200,body:{id:shop.id,status:"disconnected"}};
+}
 export function accountReadiness(account,scopes,pageTasks) {
  if(account.platform==="facebook") return facebookPublishReadiness(scopes,pageTasks);
  if(account.platform==="tiktok") return {ready:false,missing:["TikTok publishing is not enabled (connection only)"]};
@@ -755,12 +890,13 @@ async function handle(request,env) {
  if(path==="/webhooks/meta") return handleWebhook(request,env,url);
  if(method==="GET"&&path==="/oauth/meta/callback") return finishMetaOAuth(request,env,url);
  if(method==="GET"&&path==="/oauth/tiktok/callback") return finishTikTokOAuth(request,env,url);
+ if(method==="GET"&&path==="/oauth/shopee-seller/callback") return finishShopeeSellerOAuth(request,env,url);
  if(method==="GET"&&(path==="/"||path==="/health")) {
   const setup=!!env.BOOTSTRAP_KEY&&!!env.TOKEN_ENCRYPTION_KEY;
   const users=await env.DB.prepare("SELECT COUNT(*) n FROM app_users").first();
   const {results:facebookAccounts=[]}=await env.DB.prepare("SELECT scopes_json,page_tasks_json FROM social_accounts WHERE platform='facebook' AND status='connected'").all();
   const publishReadyAccounts=facebookAccounts.filter(a=>facebookPublishReadiness(JSON.parse(a.scopes_json||"[]"),JSON.parse(a.page_tasks_json||"[]")).ready).length;
-  return json({service:"Alpha Centauri Social Commerce Cloud API",status:"online",mode:"cloud",setup_ready:setup,admin_initialized:(users?.n||0)>0,publishing_enabled:publishReadyAccounts>0,publishing_adapter_enabled:true,publishing_adapter:"facebook_page_photo",publishing_formats:["text","photo"],publish_ready_accounts:publishReadyAccounts,meta_oauth_configured:metaAnyConfigured(env),meta_instagram_configured:metaConfigured(env,"instagram"),meta_facebook_configured:metaConfigured(env,"facebook"),meta_webhook_configured:webhookConfigured(env),meta_redirect_uri:env.META_REDIRECT_URI||null,tiktok_oauth_configured:tiktokConfigured(env),tiktok_redirect_uri:tiktokRedirectUri(env),tiktok_scopes:tiktokScopes(env),tiktok_publishing_enabled:false,shopee_affiliate_configured:shopeeAffiliateConfigured(env),shopee_affiliate_endpoint:shopeeAffiliateEndpoint(env),shopee_affiliate_mode:"read_only",platforms:Object.fromEntries(PLATFORMS.map(p=>[p,p==="instagram"?(metaConfigured(env,"instagram")?"oauth_ready":"oauth_not_configured"):p==="facebook"?(metaConfigured(env,"facebook")?"oauth_ready":"oauth_not_configured"):p==="tiktok"?(tiktokConfigured(env)?"oauth_ready":"oauth_not_configured"):p==="shopee_affiliate"?(shopeeAffiliateConfigured(env)?"api_ready":"awaiting_api_approval"):"oauth_not_configured"]))},200,cors(request));
+  return json({service:"Alpha Centauri Social Commerce Cloud API",status:"online",mode:"cloud",setup_ready:setup,admin_initialized:(users?.n||0)>0,publishing_enabled:publishReadyAccounts>0,publishing_adapter_enabled:true,publishing_adapter:"facebook_page_photo",publishing_formats:["text","photo"],publish_ready_accounts:publishReadyAccounts,meta_oauth_configured:metaAnyConfigured(env),meta_instagram_configured:metaConfigured(env,"instagram"),meta_facebook_configured:metaConfigured(env,"facebook"),meta_webhook_configured:webhookConfigured(env),meta_redirect_uri:env.META_REDIRECT_URI||null,tiktok_oauth_configured:tiktokConfigured(env),tiktok_redirect_uri:tiktokRedirectUri(env),tiktok_scopes:tiktokScopes(env),tiktok_publishing_enabled:false,shopee_seller_configured:shopeeSellerConfigured(env),shopee_seller_environment:shopeeSellerEnv(env),shopee_seller_redirect_uri:shopeeSellerRedirectUri(env),shopee_seller_read_only:true,shopee_affiliate_configured:shopeeAffiliateConfigured(env),shopee_affiliate_endpoint:shopeeAffiliateEndpoint(env),shopee_affiliate_mode:"read_only",platforms:{...Object.fromEntries(PLATFORMS.map(p=>[p,p==="instagram"?(metaConfigured(env,"instagram")?"oauth_ready":"oauth_not_configured"):p==="facebook"?(metaConfigured(env,"facebook")?"oauth_ready":"oauth_not_configured"):p==="tiktok"?(tiktokConfigured(env)?"oauth_ready":"oauth_not_configured"):p==="shopee_affiliate"?(shopeeAffiliateConfigured(env)?"api_ready":"awaiting_api_approval"):"oauth_not_configured"])),shopee_seller:shopeeSellerConfigured(env)?"oauth_ready":"oauth_not_configured"}},200,cors(request));
  }
  if(method==="POST"&&path==="/auth/bootstrap") {
   if(!env.BOOTSTRAP_KEY||(request.headers.get("Authorization")||"").replace(/^Bootstrap\s+/i,"")!==env.BOOTSTRAP_KEY) return json({error:"Invalid bootstrap key"},403,cors(request));
@@ -804,6 +940,18 @@ async function handle(request,env) {
   await env.DB.prepare("INSERT INTO oauth_states(state_hash,owner_user_id,platform,expires_at,created_at) VALUES(?,?,?,?,?)").bind(await sha(state),user.id,"tiktok",expiry,stamp).run();
   return json({authorization_url:buildTikTokAuthorizationUrl(env,state),expires_at:expiry,redirect_uri:tiktokRedirectUri(env),platform:"tiktok",scopes:tiktokScopes(env)},200,cors(request));
  }
+ if(method==="POST"&&path==="/oauth/shopee-seller/start") {
+  if(!shopeeSellerConfigured(env)) return json({error:"Shopee Open Platform partner is not configured on the Cloudflare Worker (SHOPEE_PARTNER_ID / SHOPEE_PARTNER_KEY)"},503,cors(request));
+  const state=random(32),stamp=now(),expiry=new Date(Date.now()+10*60*1000).toISOString();
+  await env.DB.prepare("DELETE FROM oauth_states WHERE expires_at<=?").bind(stamp).run();
+  await env.DB.prepare("INSERT INTO oauth_states(state_hash,owner_user_id,platform,expires_at,created_at) VALUES(?,?,?,?,?)").bind(await sha(state),user.id,"shopee_seller",expiry,stamp).run();
+  return json({authorization_url:await buildShopeeSellerAuthorizationUrl(env,state),expires_at:expiry,redirect_uri:shopeeSellerRedirectUri(env),platform:"shopee_seller",environment:shopeeSellerEnv(env),read_only:true},200,cors(request));
+ }
+ if(method==="GET"&&path==="/shopee-seller/shops") return json({configured:shopeeSellerConfigured(env),environment:shopeeSellerEnv(env),read_only:true,shops:await listShopeeSellerShops(env,user)},200,cors(request));
+ const shopeeSellerVerify=path.match(/^\/shopee-seller\/shops\/([a-zA-Z0-9_-]+)\/verify$/);
+ if(method==="POST"&&shopeeSellerVerify) { const r=await verifyShopeeSellerShop(env,user,shopeeSellerVerify[1]); return json(r.body,r.status,cors(request)); }
+ const shopeeSellerShop=path.match(/^\/shopee-seller\/shops\/([a-zA-Z0-9_-]+)$/);
+ if(method==="DELETE"&&shopeeSellerShop) { const r=await disconnectShopeeSellerShop(env,user,shopeeSellerShop[1]); return json(r.body,r.status,cors(request)); }
  if(method==="POST"&&path==="/affiliate/shopee/connect") { const r=await connectShopeeAffiliate(env,user); return json(r.body,r.status,cors(request)); }
  const accountVerify=path.match(/^\/accounts\/([a-zA-Z0-9_-]+)\/verify$/);
  if(method==="POST"&&accountVerify) { const r=await verifyAccount(env,user,accountVerify[1]); return json(r.body,r.status,cors(request)); }
