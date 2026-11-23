@@ -44,6 +44,15 @@ This checklist identifies owner actions required before real integrations can be
 - Apply through the official Affiliate Open API process: https://help.shopee.co.th/portal/4/article/198622-%E0%B8%82%E0%B8%B1%E0%B9%89%E0%B8%99%E0%B8%95%E0%B8%AD%E0%B8%99%E0%B8%81%E0%B8%B2%E0%B8%A3%E0%B8%82%E0%B8%AD%E0%B9%80%E0%B8%9B%E0%B8%B4%E0%B8%94-Affiliate-Open-API
 - Do not enable API reporting until approval and current endpoint documentation are confirmed.
 
+### Account connection (read-only) — implemented in the Cloud Worker
+- After approval, copy **AppID** and **Secret** from affiliate.shopee.co.th > เปิด API > API ของฉัน.
+- Store them only as Cloudflare Worker secrets: `wrangler secret put SHOPEE_AFFILIATE_APP_ID` and `wrangler secret put SHOPEE_AFFILIATE_SECRET`.
+  Optional plain variable `SHOPEE_AFFILIATE_ENDPOINT` (default `https://open-api.affiliate.shopee.co.th/graphql`; only `open-api.affiliate.shopee.*` hosts are accepted).
+- `GET /health` reports `platforms.shopee_affiliate = "api_ready"` once both secrets exist (`"awaiting_api_approval"` before); the Dashboard then enables **เชื่อมต่อ Shopee Affiliate · Open API**.
+- Endpoints: `POST /affiliate/shopee/connect` (one signed read-only `shopeeOfferV2(limit:1)` query, then saves the account), `POST /accounts/{id}/verify` (repeats the live check), `DELETE /accounts/{id}`.
+- Signing per Shopee docs: `Authorization: SHA256 Credential={AppId}, Timestamp={unix}, Signature=sha256(AppId+Timestamp+Payload+Secret)`; timestamp must be within 10 minutes of Shopee's clock.
+- No short links, conversion reports, orders, listings or other transactions are called by this adapter. The secret is never stored in D1 or logs.
+
 ## Lazada Affiliate
 - Confirm the current Thailand Affiliate/Publisher API program and account eligibility with Lazada's official affiliate partner portal. A Lazada Open Platform community answer states that Affiliate API onboarding is guided through the Lazada Affiliate platform, rather than by creating a normal Seller Open Platform app; confirm this directly with partner support before implementation.
 - Lazada Open Platform Seller APIs are intended for professional sellers managing their stores and are not proof of Affiliate API access.
