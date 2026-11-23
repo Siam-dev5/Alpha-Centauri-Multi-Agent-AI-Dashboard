@@ -1,3 +1,4 @@
+import { createShopeeSellerModule } from "./shopee_seller.mjs";
 const ORIGIN = "https://siam-dev5.github.io";
 // The Dashboard is served both from GitHub Pages and from this Worker's own origin.
 const DASHBOARD_ORIGINS = [ORIGIN, "https://social-api.siamhrbp.com"];
@@ -102,6 +103,8 @@ function oauthResultPage(type,label,status,message) {
  return new Response("<!doctype html><html lang='th'><meta charset='utf-8'><title>"+label+" connection</title><body style='font:16px sans-serif;background:#090d1e;color:#e2e8f0;padding:32px'><p>"+(status==="connected"?"เชื่อมต่อ "+label+" สำเร็จ":"การเชื่อมต่อ "+label+" ไม่สำเร็จ")+"</p><script>const data="+payload+";if(window.opener){for(const o of "+JSON.stringify(DASHBOARD_ORIGINS)+"){try{window.opener.postMessage(data,o);}catch(e){}}}setTimeout(()=>window.close(),900);</script></body></html>",{status:200,headers:{"Content-Type":"text/html; charset=utf-8","Cache-Control":"no-store","X-Content-Type-Options":"nosniff"}});
 }
 function metaResultPage(status,message) { return oauthResultPage("ALPHA_CENTAURI_META_OAUTH","Meta",status,message); }
+// Shopee Seller (shop owner) module lives in its own file; read-only, separate from Shopee Affiliate.
+const shopeeSeller=createShopeeSellerModule({encrypt,decrypt,random,sha,now,audit,safeText,resultPage:oauthResultPage});
 // ---- TikTok Login Kit (web): connect TikTok accounts. Connection only; publishing is NOT enabled here. ----
 // Docs: developers.tiktok.com/doc/login-kit-web, /doc/oauth-user-access-token-management, /doc/tiktok-api-v2-get-user-info
 const TIKTOK_AUTH_URL="https://www.tiktok.com/v2/auth/authorize/";
@@ -755,12 +758,13 @@ async function handle(request,env) {
  if(path==="/webhooks/meta") return handleWebhook(request,env,url);
  if(method==="GET"&&path==="/oauth/meta/callback") return finishMetaOAuth(request,env,url);
  if(method==="GET"&&path==="/oauth/tiktok/callback") return finishTikTokOAuth(request,env,url);
+ if(method==="GET"&&path==="/oauth/shopee-seller/callback") return shopeeSeller.callback(env,url);
  if(method==="GET"&&(path==="/"||path==="/health")) {
   const setup=!!env.BOOTSTRAP_KEY&&!!env.TOKEN_ENCRYPTION_KEY;
   const users=await env.DB.prepare("SELECT COUNT(*) n FROM app_users").first();
   const {results:facebookAccounts=[]}=await env.DB.prepare("SELECT scopes_json,page_tasks_json FROM social_accounts WHERE platform='facebook' AND status='connected'").all();
   const publishReadyAccounts=facebookAccounts.filter(a=>facebookPublishReadiness(JSON.parse(a.scopes_json||"[]"),JSON.parse(a.page_tasks_json||"[]")).ready).length;
-  return json({service:"Alpha Centauri Social Commerce Cloud API",status:"online",mode:"cloud",setup_ready:setup,admin_initialized:(users?.n||0)>0,publishing_enabled:publishReadyAccounts>0,publishing_adapter_enabled:true,publishing_adapter:"facebook_page_photo",publishing_formats:["text","photo"],publish_ready_accounts:publishReadyAccounts,meta_oauth_configured:metaAnyConfigured(env),meta_instagram_configured:metaConfigured(env,"instagram"),meta_facebook_configured:metaConfigured(env,"facebook"),meta_webhook_configured:webhookConfigured(env),meta_redirect_uri:env.META_REDIRECT_URI||null,tiktok_oauth_configured:tiktokConfigured(env),tiktok_redirect_uri:tiktokRedirectUri(env),tiktok_scopes:tiktokScopes(env),tiktok_publishing_enabled:false,shopee_affiliate_configured:shopeeAffiliateConfigured(env),shopee_affiliate_endpoint:shopeeAffiliateEndpoint(env),shopee_affiliate_mode:"read_only",platforms:Object.fromEntries(PLATFORMS.map(p=>[p,p==="instagram"?(metaConfigured(env,"instagram")?"oauth_ready":"oauth_not_configured"):p==="facebook"?(metaConfigured(env,"facebook")?"oauth_ready":"oauth_not_configured"):p==="tiktok"?(tiktokConfigured(env)?"oauth_ready":"oauth_not_configured"):p==="shopee_affiliate"?(shopeeAffiliateConfigured(env)?"api_ready":"awaiting_api_approval"):"oauth_not_configured"]))},200,cors(request));
+  return json({service:"Alpha Centauri Social Commerce Cloud API",status:"online",mode:"cloud",setup_ready:setup,admin_initialized:(users?.n||0)>0,publishing_enabled:publishReadyAccounts>0,publishing_adapter_enabled:true,publishing_adapter:"facebook_page_photo",publishing_formats:["text","photo"],publish_ready_accounts:publishReadyAccounts,meta_oauth_configured:metaAnyConfigured(env),meta_instagram_configured:metaConfigured(env,"instagram"),meta_facebook_configured:metaConfigured(env,"facebook"),meta_webhook_configured:webhookConfigured(env),meta_redirect_uri:env.META_REDIRECT_URI||null,tiktok_oauth_configured:tiktokConfigured(env),tiktok_redirect_uri:tiktokRedirectUri(env),tiktok_scopes:tiktokScopes(env),tiktok_publishing_enabled:false,shopee_affiliate_configured:shopeeAffiliateConfigured(env),shopee_affiliate_endpoint:shopeeAffiliateEndpoint(env),shopee_affiliate_mode:"read_only",shopee_seller:await shopeeSeller.status(env),platforms:Object.fromEntries(PLATFORMS.map(p=>[p,p==="instagram"?(metaConfigured(env,"instagram")?"oauth_ready":"oauth_not_configured"):p==="facebook"?(metaConfigured(env,"facebook")?"oauth_ready":"oauth_not_configured"):p==="tiktok"?(tiktokConfigured(env)?"oauth_ready":"oauth_not_configured"):p==="shopee_affiliate"?(shopeeAffiliateConfigured(env)?"api_ready":"awaiting_api_approval"):"oauth_not_configured"]))},200,cors(request));
  }
  if(method==="POST"&&path==="/auth/bootstrap") {
   if(!env.BOOTSTRAP_KEY||(request.headers.get("Authorization")||"").replace(/^Bootstrap\s+/i,"")!==env.BOOTSTRAP_KEY) return json({error:"Invalid bootstrap key"},403,cors(request));
@@ -804,6 +808,11 @@ async function handle(request,env) {
   await env.DB.prepare("INSERT INTO oauth_states(state_hash,owner_user_id,platform,expires_at,created_at) VALUES(?,?,?,?,?)").bind(await sha(state),user.id,"tiktok",expiry,stamp).run();
   return json({authorization_url:buildTikTokAuthorizationUrl(env,state),expires_at:expiry,redirect_uri:tiktokRedirectUri(env),platform:"tiktok",scopes:tiktokScopes(env)},200,cors(request));
  }
+ if(method==="POST"&&path==="/oauth/shopee-seller/start") { const r=await shopeeSeller.start(env,user); return json(r.body,r.status,cors(request)); }
+ if(method==="GET"&&path==="/shopee-seller/shops") { const r=await shopeeSeller.list(env,user); return json(r.body,r.status,cors(request)); }
+ const sellerShop=path.match(/^\/shopee-seller\/shops\/([a-zA-Z0-9_-]+)(\/verify)?$/);
+ if(sellerShop&&method==="POST"&&sellerShop[2]) { const r=await shopeeSeller.verify(env,user,sellerShop[1]); return json(r.body,r.status,cors(request)); }
+ if(sellerShop&&method==="DELETE"&&!sellerShop[2]) { const r=await shopeeSeller.disconnect(env,user,sellerShop[1]); return json(r.body,r.status,cors(request)); }
  if(method==="POST"&&path==="/affiliate/shopee/connect") { const r=await connectShopeeAffiliate(env,user); return json(r.body,r.status,cors(request)); }
  const accountVerify=path.match(/^\/accounts\/([a-zA-Z0-9_-]+)\/verify$/);
  if(method==="POST"&&accountVerify) { const r=await verifyAccount(env,user,accountVerify[1]); return json(r.body,r.status,cors(request)); }

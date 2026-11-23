@@ -53,6 +53,20 @@ This checklist identifies owner actions required before real integrations can be
 - Signing per Shopee docs: `Authorization: SHA256 Credential={AppId}, Timestamp={unix}, Signature=sha256(AppId+Timestamp+Payload+Secret)`; timestamp must be within 10 minutes of Shopee's clock.
 - No short links, conversion reports, orders, listings or other transactions are called by this adapter. The secret is never stored in D1 or logs.
 
+## Shopee Seller (ร้านค้าของผู้ใช้) — separate module, read-only
+- Separate from the Affiliate adapter: code in `cloudflare/shopee_seller.mjs`, data in table `shopee_shops` (`migrations/0009_shopee_seller_shops.sql`, additive). Dashboard tab **ร้านค้า Shopee**.
+- Scope: authorize a shop, exchange/refresh tokens, read `v2.shop.get_shop_info` (name, region, status, authorization expiry). An allow-list blocks every other Shopee path (products, orders, logistics, payments) before a request is made.
+- Prerequisites (the seller must do these; no shortcut):
+  1. Register a developer account at https://open.shopee.com (separate email login from Seller Centre).
+  2. Create an app for your own shop (Seller In House System type) and set the Live Redirect URL Domain to `social-api.siamhrbp.com`.
+  3. Put the Live credentials only into Worker secrets: `wrangler secret put SHOPEE_PARTNER_ID`, `wrangler secret put SHOPEE_PARTNER_KEY` (optional `SHOPEE_SELLER_ENV=sandbox`, `SHOPEE_SELLER_REDIRECT_URI`).
+  4. Apply migration 0009 to D1 (needs a Cloudflare token with D1 edit permission).
+  5. Seller authorization: the shop account logs in on Shopee, enters the SMS OTP and confirms (validity up to 365 days). Main accounts are not supported yet; sub-accounts cannot authorize.
+- Redirect URI: `https://social-api.siamhrbp.com/api/social-commerce/oauth/shopee-seller/callback`
+- Endpoints: `POST /oauth/shopee-seller/start`, `GET /oauth/shopee-seller/callback`, `GET /shopee-seller/shops`, `POST /shopee-seller/shops/{id}/verify`, `DELETE /shopee-seller/shops/{id}`. `/health` → `shopee_seller {configured, schema_ready, environment, mode:"read_only"}`.
+- Signing: HMAC-SHA256(partner_key, partner_id+path+timestamp[+access_token+shop_id]), timestamp valid 5 minutes. access_token 4 h; refresh_token 30 days and single-use (rotated pair stored at once). Tokens AES-GCM encrypted at rest.
+- Docs: https://open.shopee.com/developer-guide/20, https://open.shopee.com/documents/v2/v2.shop.get_shop_info?module=92&type=1
+
 ## Lazada Affiliate
 - Confirm the current Thailand Affiliate/Publisher API program and account eligibility with Lazada's official affiliate partner portal. A Lazada Open Platform community answer states that Affiliate API onboarding is guided through the Lazada Affiliate platform, rather than by creating a normal Seller Open Platform app; confirm this directly with partner support before implementation.
 - Lazada Open Platform Seller APIs are intended for professional sellers managing their stores and are not proof of Affiliate API access.
