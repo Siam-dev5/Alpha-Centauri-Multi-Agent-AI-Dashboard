@@ -1,4 +1,5 @@
 import { createShopeeSellerModule } from "./shopee_seller.mjs";
+import CAMPAIGN_BANK from "../content/routine-content-bank.json" with { type: "json" };
 const ORIGIN = "https://siam-dev5.github.io";
 // The Dashboard is served both from GitHub Pages and from this Worker's own origin.
 const DASHBOARD_ORIGINS = [ORIGIN, "https://social-api.siamhrbp.com"];
@@ -301,7 +302,7 @@ export function accountReadiness(account,scopes,pageTasks) {
 //  POST /{page-id}/messages {recipient:{comment_id}, message:{text}} · needs pages_messaging + Page task MESSAGING
 //  · only one private reply per comment · only within 7 days of the comment.
 // Safety: COMMENT_DM_MODE is "off" unless set; "dry_run" records leads without sending; "live" sends.
-// COMMENT_DM_ALLOW_IDS (comma-separated commenter IDs) limits live sends to those people, e.g. for a test.
+// COMMENT_DM_ALLOW_IDS (comma-separated commenter IDs or comment IDs) limits live sends to those people/comments, e.g. for a test.
 // Only comments under posts published by the creative workflow in the last 7 days are read.
 // A lead row is unique per comment and claimed before sending, so a comment is never messaged twice.
 const DM_WINDOW_MS=7*86400000, DM_SAFETY_MS=3600000, DM_MAX_SENDS_PER_RUN=10, DM_MAX_POSTS=30;
@@ -367,7 +368,7 @@ export async function runCommentSecretaryForAccount(env,account,actor) {
   const age=Date.now()-Date.parse(lead.comment_created_at||0);
   const already=lead.commenter_id?await env.DB.prepare("SELECT id FROM comment_leads WHERE account_id=? AND post_id=? AND commenter_id=? AND id<>? AND status IN ('sending','sent','unknown','failed')").bind(account.id,lead.post_id,lead.commenter_id,lead.id).first():null;
   const skip=!(age>=0&&age<DM_WINDOW_MS-DM_SAFETY_MS)?"Comment is older than Facebook's 7-day private-reply window"
-   :(allow.length&&!allow.includes(String(lead.commenter_id||"")))?"Commenter is not on COMMENT_DM_ALLOW_IDS (test allowlist)"
+   :(allow.length&&!allow.includes(String(lead.commenter_id||""))&&!allow.includes(String(lead.comment_id)))?"Commenter/comment is not on COMMENT_DM_ALLOW_IDS (test allowlist)"
    :already?"This person was already messaged (or attempted) for this post":null;
   if(skip) { await env.DB.prepare("UPDATE comment_leads SET status='skipped',reason=?,updated_at=? WHERE id=? AND status='pending'").bind(skip,now(),lead.id).run(); summary.skipped++; continue; }
   const claim=await env.DB.prepare("UPDATE comment_leads SET status='sending',updated_at=? WHERE id=? AND status='pending'").bind(now(),lead.id).run();
@@ -733,6 +734,58 @@ export async function wfView(env,runId,ownerId,after=0) {
  const {results:assets=[]}=await env.DB.prepare("SELECT kind,prompt,model,width,height,bytes,fb_photo_id,created_at FROM workflow_assets WHERE run_id=? ORDER BY created_at").bind(runId).all();
  const {plan_json,creative_json,...rest}=run;
  return {run:{...rest,plan:plan_json?JSON.parse(plan_json):null,creative:creative_json?JSON.parse(creative_json):null},events:events.map(e=>({...e,detail:e.detail_json?JSON.parse(e.detail_json):null,detail_json:undefined})),assets};
+}
+// ---- Always-on daily campaign (server-side; runs even when OpenBot and the browser are closed) ----
+// Slots: 10:30 and 17:30 Asia/Bangkok (UTC+7, no DST) = 03:30 and 10:30 UTC. The 5-minute cron checks for a due slot.
+// Each slot posts ONE creative-workflow run using the next content ID ([CID:...]) that has never been used; the existing
+// workflow does Master → Creative → Graphic → Facebook publish, and Auto-Like likes the Page's own post. No comments, no DMs.
+// Off unless CAMPAIGN_SCHEDULER="on". A slot is handled once: an audit "campaign_slot" claim, and any workflow run created
+// since 30 minutes before the slot (e.g. by the OpenBot routine) counts as that slot's post, so nothing posts twice.
+export const CAMPAIGN_SLOTS_UTC=[{label:"10:30",h:3,m:30},{label:"17:30",h:10,m:30}];
+const CAMPAIGN_WINDOW_MS=60*60000, CAMPAIGN_FILL_LOOKBACK_MS=30*60000;
+export const campaignEnabled=(env)=>String(env.CAMPAIGN_SCHEDULER||"").trim().toLowerCase()==="on";
+export function campaignDueSlot(now=new Date()) {
+ for(const s of CAMPAIGN_SLOTS_UTC) {
+  const start=Date.UTC(now.getUTCFullYear(),now.getUTCMonth(),now.getUTCDate(),s.h,s.m);
+  if(now.getTime()>=start&&now.getTime()<start+CAMPAIGN_WINDOW_MS) {
+   const bkk=new Date(start+7*3600000).toISOString().slice(0,10);
+   return {key:bkk+"@"+s.label,label:s.label,start:new Date(start).toISOString()};
+  }
+ }
+ return null;
+}
+export function pickNextCampaignItem(bank,usedCids) {
+ return [...(bank.week1||[]),...(bank.reserves||[])].find(i=>i&&i.cid&&i.command&&!usedCids.has(i.cid))||null;
+}
+export async function runCampaignScheduler(env,now=new Date(),bank=CAMPAIGN_BANK) {
+ if(!campaignEnabled(env)) return {skipped:"disabled"};
+ const slot=campaignDueSlot(now);
+ if(!slot) return {skipped:"no slot due"};
+ const claimed=await env.DB.prepare("SELECT id FROM audit_events WHERE event_type='campaign_slot' AND entity_id=?").bind(slot.key).first();
+ if(claimed) return {slot:slot.key,skipped:"slot already handled"};
+ const {results:fb=[]}=await env.DB.prepare("SELECT owner_user_id,scopes_json,page_tasks_json FROM social_accounts WHERE platform='facebook' AND status='connected' AND encrypted_access_token IS NOT NULL").all();
+ const owners=[...new Set(fb.filter(a=>facebookPublishReadiness(JSON.parse(a.scopes_json||"[]"),JSON.parse(a.page_tasks_json||"[]")).ready).map(a=>a.owner_user_id))];
+ const claim=async(ownerId,details)=>audit(env,ownerId,"campaign_slot","campaign",slot.key,"campaign_scheduler",details);
+ if(owners.length!==1) { const e=owners.length?"several Dashboard users own publish-ready Pages":"no publish-ready Facebook Page"; console.error("campaign",{slot:slot.key,error:e}); return {slot:slot.key,error:e}; }
+ const ownerId=owners[0];
+ const since=new Date(Date.parse(slot.start)-CAMPAIGN_FILL_LOOKBACK_MS).toISOString();
+ const existing=await env.DB.prepare("SELECT id,command FROM workflow_runs WHERE owner_user_id=? AND created_at>=? ORDER BY created_at LIMIT 1").bind(ownerId,since).first();
+ if(existing) { await claim(ownerId,{filled_by:existing.id,cid:wfDirectives(existing.command).cid,source:"existing run"}); return {slot:slot.key,skipped:"slot already has a run",run:existing.id}; }
+ const {results:runs=[]}=await env.DB.prepare("SELECT command FROM workflow_runs WHERE owner_user_id=? AND status IN ('running','completed')").bind(ownerId).all();
+ const used=new Set(runs.map(r=>wfDirectives(r.command).cid).filter(Boolean));
+ const item=pickNextCampaignItem(bank,used);
+ if(!item) { await claim(ownerId,{error:"content bank exhausted"}); console.error("campaign",{slot:slot.key,error:"content bank exhausted"}); return {slot:slot.key,error:"content bank exhausted"}; }
+ await claim(ownerId,{cid:item.cid,topic:item.topic});
+ const user=await env.DB.prepare("SELECT id,email FROM app_users WHERE id=?").bind(ownerId).first();
+ const created=await wfCreateRun(env,user,item.command);
+ if(created.error) return {slot:slot.key,cid:item.cid,error:created.error};
+ for(let i=0;i<8;i++) {
+  if(!await wfAdvance(env,created.id,ownerId,"campaign_scheduler")) break;
+  const s=await env.DB.prepare("SELECT status FROM workflow_runs WHERE id=?").bind(created.id).first();
+  if(s?.status!=="running") break;
+ }
+ const run=await env.DB.prepare("SELECT status,post_id,error_message FROM workflow_runs WHERE id=?").bind(created.id).first();
+ return {slot:slot.key,cid:item.cid,run:created.id,status:run?.status,post_id:run?.post_id||null,error:run?.error_message||null};
 }
 export async function runScheduledWorkflows(env) {
  const stamp=now(),stale=new Date(Date.now()-60000).toISOString();
@@ -1175,5 +1228,5 @@ async scheduled(event,env,ctx) {
  ctx.waitUntil(runScheduledAutoLike(env).then(r=>console.log("auto-like-cron",{accounts:r.length,results:r.map(x=>({liked:x.liked,failed:x.failed,queued:x.queued,error:x.error||null}))})).catch(e=>console.error("auto-like-cron",{message:safeText(e?.message||"unknown",200)})));
  // Resume creative workflows whose browser driver went away (stale, unlocked, still running).
  ctx.waitUntil(runCommentSecretary(env).then(r=>r.length&&console.log("comment-dm-cron",{results:r})).catch(e=>console.error("comment-dm-cron",{message:safeText(e?.message||"unknown",200)})));
- if(env.AI) ctx.waitUntil(runScheduledWorkflows(env).then(n=>n&&console.log("workflow-cron",{resumed:n})).catch(e=>console.error("workflow-cron",{message:safeText(e?.message||"unknown",200)})));
+ if(env.AI) ctx.waitUntil(runCampaignScheduler(env).then(r=>r&&!r.skipped&&console.log("campaign",r)).catch(e=>console.error("campaign",{message:safeText(e?.message||"unknown",200)})).then(()=>runScheduledWorkflows(env)).then(n=>n&&console.log("workflow-cron",{resumed:n})).catch(e=>console.error("workflow-cron",{message:safeText(e?.message||"unknown",200)})));
 }};
