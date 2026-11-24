@@ -148,3 +148,10 @@ test("API: view and manual scan require a session; missing migration is reported
   const scan = await (await worker.fetch(api("/secretary/scan", "POST", {}), env)).json();
   assert.match(scan.results[0].error, /0010_comment_leads/);
 });
+
+test("the test allowlist can name a single comment ID (Facebook may omit the commenter ID)", async (t) => {
+  const { db, env, calls } = await setup(t, { env: { ...LIVE, COMMENT_DM_ALLOW_IDS: "c2" } });
+  await runCommentSecretary(env);
+  assert.deepEqual(calls.sends.map(s => s.comment_id), ["c2"], "only the allow-listed comment gets the reply");
+  assert.equal(db.prepare("SELECT status FROM comment_leads WHERE comment_id='c1'").get().status, "skipped");
+});
