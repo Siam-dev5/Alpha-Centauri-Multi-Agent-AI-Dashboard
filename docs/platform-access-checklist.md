@@ -78,3 +78,10 @@ This checklist identifies owner actions required before real integrations can be
 - Store credentials in the local machine's .env or a secrets manager.
 - Use a unique encryption key for token-at-rest encryption.
 - Never upload .env, client secrets, refresh tokens or access tokens to GitHub or chat.
+
+## Video Editor (short vertical clips) — cloud workflow + render node
+- A chat command containing `[VIDEO]` or `Video Editor` (plus a post/page word) runs Master Bot → Creative Bot → Graphic Design (one 1080x1920 background, no people) → **Video Editor** → แอดมินโซเชียล.
+- `TEXT:"..."` and `VO:"..."` in the command are used verbatim for the on-screen hook and the Thai voice-over; `[CID:...]` blocks duplicates.
+- Rendering cannot run in a Worker. The run waits at `video_awaiting_render`; the render node `scripts/video_editor/render_node.py` (this PC: ffmpeg, Microsoft Edge for Thai text, edge-tts voice `th-TH-NiwatNeural`, Kanit font) composites the character from the reference photo, renders 1080x1920 / 6 s / h264+aac, runs QC (ffprobe, loudness, frames contact sheet) and stops.
+- Only `render_node.py --publish` hands the checked MP4 to `POST /video-jobs/{id}/publish`; the Worker re-checks the QC (9:16 1080x1920, ~6 s, h264/aac with audio, subtitles, character) and posts ONE Page video (`graph-video.facebook.com/{v}/{page}/videos`). The file is not stored in D1. A second upload returns 409; failures are recorded and never retried.
+- Render-node endpoints use header `X-Render-Token` = Worker secret `VIDEO_RENDER_TOKEN` (≥ 32 chars).
