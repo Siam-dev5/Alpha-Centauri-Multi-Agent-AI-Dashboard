@@ -552,6 +552,45 @@ async function wfEvent(env,runId,from,to,status,message,detail=null) {
   .bind(random(12),runId,row?.n||1,from,to,status,safeText(message,700),detail?JSON.stringify(detail).slice(0,6000):null,now()).run();
 }
 const wfImagePrompt=(p)=>safeText(p,900)+", professional social media visual, clean composition, high quality, no text, no letters, no words, no logos, no watermark";
+// ---- Video Editor mode (short vertical clip) ----
+// A command that contains [VIDEO] or "Video Editor" runs: Master Bot → Creative Bot → Graphic Design (one 9:16 keyframe)
+// → Video Editor (render node) → แอดมินโซเชียล (ONE Facebook Page video post).
+// Rendering (ffmpeg, Thai TTS, subtitles, character compositing) cannot run inside a Worker, so the run waits at
+// "video_awaiting_render" until the render node (scripts/video_editor/render_node.py, authenticated with VIDEO_RENDER_TOKEN)
+// renders, checks the file and hands it over. The MP4 is streamed to Facebook and not stored in D1.
+// Exact wording: TEXT:"..." (on-screen hook) and VO:"..." (voice-over) in the command are used verbatim.
+export const WF_VIDEO_SPEC={width:1080,height:1920,duration:6,fps:30};
+export const wfIsVideo=(command)=>/\[VIDEO\]|video\s*editor/i.test(String(command||""));
+export function wfVideoDirectives(command) {
+ const text=String(command||"");
+ const pick=(key,max)=>{ const m=text.match(new RegExp(key+'\\s*[:：]\\s*["“]([^"“”\\n]{1,'+max+'})["”]',"i")); return m?m[1].trim():null; };
+ return {text:pick("TEXT",120),vo:pick("VO",240)};
+}
+// Two subtitle lines, split at the space or Thai connective nearest the middle (Thai has no spaces between words).
+export function wfSubtitleLines(vo) {
+ const s=String(vo||"").trim();
+ if(s.length<=20) return [s];
+ const mid=s.length/2;
+ const cuts=[];
+ for(const w of [" ","…","แล้ว","ว่า","คือ","แต่","จะ","ไม่"]) { let i=s.indexOf(w,4); while(i>0&&i<s.length-4) { cuts.push(w===" "||w==="…"?i+1:i); i=s.indexOf(w,i+1); } }
+ if(!cuts.length) return [s];
+ const cut=cuts.sort((a,b)=>Math.abs(a-mid)-Math.abs(b-mid))[0];
+ return [s.slice(0,cut).trim(),s.slice(cut).trim()].filter(Boolean);
+}
+const wfVideoKeyframePrompt=(p)=>safeText(p,700)+", vertical 9:16 composition, cinematic dark modern corporate office at night, neon cyan and magenta accent lights, glowing floating resume documents in the air, open empty space in the lower center for a person to be composited, no people, no person, no human, no text, no letters, no words, no logos, no watermark, high detail";
+export function wfVideoQcProblems(qc,size,head) {
+ const p=[];
+ if(!(size>=50*1024&&size<=25*1024*1024)) p.push("file size "+size+" bytes is outside 50 KB–25 MB");
+ if(!head||String.fromCharCode(...head.slice(4,8))!=="ftyp") p.push("file is not an MP4 (no ftyp box)");
+ const q=qc&&typeof qc==="object"?qc:{};
+ if(q.width!==WF_VIDEO_SPEC.width||q.height!==WF_VIDEO_SPEC.height) p.push("resolution must be 1080x1920 (9:16), got "+q.width+"x"+q.height);
+ if(!(Number(q.duration)>=5.5&&Number(q.duration)<=6.6)) p.push("duration must be about 6 s, got "+q.duration);
+ if(q.video_codec!=="h264") p.push("video codec must be h264");
+ if(q.audio_codec!=="aac"||!q.has_audio) p.push("an AAC audio track (voice-over) is required");
+ if(!q.subtitles_burned_in) p.push("Thai subtitles must be burned in");
+ if(!q.character_reference) p.push("the main character reference must be used");
+ return p;
+}
 // Content guard for scheduled/routine commands (no schema change):
 //  [CID:<id>]  content ID — the same ID cannot start a new run while one is running or after one was published in the last 30 days.
 //  CTA "<word>" — the published caption must contain the word; when the AI leaves it out, a CTA line is appended.
@@ -596,6 +635,7 @@ async function wfStep(env,run,actor) {
  const plan=run.plan_json?JSON.parse(run.plan_json):null,creative=run.creative_json?JSON.parse(run.creative_json):null;
  const account=await env.DB.prepare("SELECT id,owner_user_id,external_account_id,account_name,status,scopes_json,page_tasks_json,encrypted_access_token FROM social_accounts WHERE id=? AND owner_user_id=? AND platform='facebook'").bind(run.target_account_id,run.owner_user_id).first();
  if(!account) throw new Error("Target Facebook Page is no longer connected");
+ if(wfIsVideo(run.command)) return wfVideoStep(env,run,account,plan);
  if(run.stage==="created") {
   await wfEvent(env,run.id,"master","master","WORKING","Master Bot กำลังวิเคราะห์คำสั่งและวางแผนมอบหมายงาน ("+WF_TEXT_MODEL+")");
   const p=await wfLlmJson(env,
@@ -711,9 +751,159 @@ async function wfStep(env,run,actor) {
  }
  throw new Error("Unknown workflow stage "+run.stage);
 }
+async function wfVideoStep(env,run,account,plan) {
+ if(run.stage==="created") {
+  await wfEvent(env,run.id,"master","master","WORKING","Master Bot กำลังวางแผนคลิปวิดีโอสั้นแนวตั้ง ("+WF_TEXT_MODEL+")");
+  const p=await wfLlmJson(env,
+   'คุณคือ Master Bot ผู้ประสานงานทีม AI ของเพจ Facebook "'+account.account_name+'" วางแผนคลิปวิดีโอสั้นแนวตั้ง 9:16 ยาว 6 วินาที 1 ซีน ให้ Creative Bot (คอนเซปต์ แคปชัน prompt ฉาก), Graphic Design (ภาพฉากหลังแนวตั้ง 1 ภาพ), Video Editor (ตัดต่อ ซับไทย เสียงบรรยาย เสียง impact) และแอดมินโซเชียล (โพสต์วิดีโอลงเพจ 1 ครั้ง) ตอบเป็น JSON เท่านั้น: {"summary":"สรุปแผนภาษาไทย 1 ประโยค","topic":"หัวข้อคลิป","audience":"กลุ่มเป้าหมาย","tone":"โทน","creative_brief":"คำสั่งถึง Creative Bot","graphic_brief":"แนวทางภาพฉากหลังถึง Graphic Design","video_brief":"แนวทางตัดต่อถึง Video Editor","social_brief":"แนวทางการโพสต์ถึงแอดมินโซเชียล"}',
+   "คำสั่งผู้ใช้: "+run.command,
+   o=>typeof o.creative_brief==="string"&&o.creative_brief.trim()&&typeof o.topic==="string");
+  await env.DB.prepare("UPDATE workflow_runs SET plan_json=?,stage='planned',updated_at=? WHERE id=?").bind(JSON.stringify({...p,mode:"video"}),now(),run.id).run();
+  await wfEvent(env,run.id,"master","creative","HANDOFF","Master Bot มอบหมาย Creative Bot (คลิปวิดีโอ 9:16 · 6 วินาที): "+safeText(p.creative_brief,400),{summary:p.summary,topic:p.topic,video_brief:p.video_brief});
+  return;
+ }
+ if(run.stage==="planned") {
+  const d=wfVideoDirectives(run.command);
+  await wfEvent(env,run.id,"creative","creative","WORKING","Creative Bot กำลังเขียนคอนเซปต์ แคปชัน และ prompt ฉากหลังของคลิป");
+  const c=await wfLlmJson(env,
+   'คุณคือ Creative Bot ของเพจ Facebook "'+account.account_name+'" (ชุมชนสายงาน HR สรรหาว่าจ้าง) สร้างคลิปสั้นแนวตั้ง 6 วินาที ตอบเป็น JSON เท่านั้น: {"concept":"คอนเซปต์ภาษาไทย 1-2 ประโยค","hook_text":"ข้อความบนจอภาษาไทยสั้น ๆ","voiceover":"เสียงบรรยายภาษาไทย 1 ประโยค อ่านจบใน 4 วินาที จบด้วยคำถามกระตุกความคิด","caption":"แคปชันโพสต์ Facebook ภาษาไทย 3-6 บรรทัด ปิดท้ายด้วยคำถามชวนคอมเมนต์และแฮชแท็ก 3-5 อัน","keyframe_prompt":"English prompt describing ONLY the background scene (no people)"} กติกา: ถ้าผู้ใช้กำหนด TEXT หรือ VO มา ให้ใช้ข้อความนั้นตรงตัว; prompt ภาพเป็นภาษาอังกฤษ ไม่มีคนและไม่มีตัวอักษร; แคปชันห้ามแต่งตัวเลขสถิติ ห้ามอ้างชื่อบริษัทหรือบุคคลจริง',
+   "คำสั่งผู้ใช้: "+run.command+"\nแผนจาก Master Bot: "+JSON.stringify(plan),
+   o=>["concept","caption","keyframe_prompt"].every(k=>typeof o[k]==="string"&&o[k].trim())&&o.caption.length>=20);
+  const hook=safeText(d.text||c.hook_text||"",120),vo=safeText(d.vo||c.voiceover||"",240);
+  if(!hook||!vo) throw new Error("Creative Bot did not produce on-screen text and voice-over");
+  const cta=wfDirectives(run.command).cta;
+  const ensured=wfEnsureCta(safeText(String(c.caption).replace(/```/g,"").trim(),2200),cta);
+  const creative={mode:"video",concept:safeText(c.concept,600),hook_text:hook,voiceover:vo,subtitle_lines:wfSubtitleLines(vo),caption:safeText(ensured.caption,2200),keyframe_prompt:safeText(c.keyframe_prompt,700),spec:WF_VIDEO_SPEC,text_source:d.text?"user":"ai",vo_source:d.vo?"user":"ai"};
+  if(cta) creative.cta={word:cta,added_by_guard:ensured.added};
+  await env.DB.prepare("UPDATE workflow_runs SET creative_json=?,stage='creative_done',updated_at=? WHERE id=?").bind(JSON.stringify(creative),now(),run.id).run();
+  await wfEvent(env,run.id,"creative","graphic","HANDOFF","Creative Bot ส่ง brief ฉากหลังให้ Graphic Design · ข้อความบนจอ \""+hook+"\" · VO \""+vo+"\"",{concept:creative.concept,hook_text:hook,voiceover:vo,subtitle_lines:creative.subtitle_lines,keyframe_prompt:creative.keyframe_prompt});
+  return;
+ }
+ if(run.stage==="creative_done") {
+  const creative=JSON.parse(run.creative_json||"{}"),prompt=wfVideoKeyframePrompt(creative.keyframe_prompt);
+  await wfEvent(env,run.id,"graphic","graphic","WORKING","Graphic Design กำลังสร้างฉากหลังแนวตั้ง 1080x1920 ("+WF_IMAGE_WIDE_MODEL+")");
+  const b64=await wfImageBase64(await env.AI.run(WF_IMAGE_WIDE_MODEL,{prompt,width:WF_VIDEO_SPEC.width,height:WF_VIDEO_SPEC.height,num_steps:20}));
+  const bytes=Math.floor(b64.length*3/4);
+  await env.DB.prepare("INSERT OR IGNORE INTO workflow_assets(id,run_id,kind,prompt,model,mime,width,height,bytes,data_b64,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)")
+   .bind(random(12),run.id,"cover",prompt,WF_IMAGE_WIDE_MODEL,"image/jpeg",WF_VIDEO_SPEC.width,WF_VIDEO_SPEC.height,bytes,b64,now()).run();
+  await env.DB.prepare("UPDATE workflow_runs SET stage='video_awaiting_render',updated_at=? WHERE id=?").bind(now(),run.id).run();
+  await wfEvent(env,run.id,"graphic","graphic","DONE","สร้างฉากหลังคลิปเสร็จ (1080x1920, "+Math.round(bytes/1024)+" KB)",{kind:"cover",role:"video_keyframe"});
+  await wfEvent(env,run.id,"graphic","video","HANDOFF","Graphic Design ส่งฉากหลัง + ข้อความบนจอ + VO + ซับให้ Video Editor · รอ render node ตัดต่อและตรวจไฟล์");
+  return;
+ }
+ throw new Error("Unknown video workflow stage "+run.stage);
+}
+// ---- Render node API (machine-to-machine, header X-Render-Token = VIDEO_RENDER_TOKEN) ----
+export async function renderTokenOk(request,env) {
+ const expected=String(env.VIDEO_RENDER_TOKEN||"");
+ const got=request.headers.get("X-Render-Token")||"";
+ if(expected.length<32||!got) return false;
+ return (await sha(got))===(await sha(expected));
+}
+const WF_VIDEO_JOB_SQL="SELECT r.id,r.owner_user_id,r.command,r.status,r.stage,r.plan_json,r.creative_json,r.target_account_id,r.created_at,a.account_name,a.external_account_id page_id FROM workflow_runs r LEFT JOIN social_accounts a ON a.id=r.target_account_id";
+const wfVideoJobView=(r)=>({id:r.id,command:r.command,status:r.status,stage:r.stage,page:r.account_name,page_id:r.page_id,created_at:r.created_at,creative:r.creative_json?JSON.parse(r.creative_json):null});
+async function wfVideoJob(env,id) {
+ const r=await env.DB.prepare(WF_VIDEO_JOB_SQL+" WHERE r.id=?").bind(id).first();
+ return r&&wfIsVideo(r.command)?r:null;
+}
+export async function wfVideoPublish(env,runId,fileBytes,qc,actor="video_render_node") {
+ const run=await wfVideoJob(env,runId);
+ if(!run) return {status:404,body:{error:"Video job not found"}};
+ if(run.status!=="running"||run.stage!=="video_awaiting_render") return {status:409,body:{error:"Video job is not waiting for a render (status "+run.status+", stage "+run.stage+")"}};
+ const problems=wfVideoQcProblems(qc,fileBytes.byteLength,fileBytes.subarray(0,12));
+ if(problems.length) {
+  await wfEvent(env,run.id,"video","video","QC_REJECTED","Worker ตรวจไฟล์ไม่ผ่าน ไม่ได้โพสต์: "+problems.join("; "),{qc});
+  return {status:422,body:{error:"Video QC failed",problems}};
+ }
+ const stamp=now();
+ const claim=await env.DB.prepare("UPDATE workflow_runs SET stage='video_publishing',lock_until=?,updated_at=? WHERE id=? AND status='running' AND stage='video_awaiting_render'").bind(new Date(Date.now()+WF_LOCK_MS).toISOString(),stamp,run.id).run();
+ if((claim.meta?.changes||0)!==1) return {status:409,body:{error:"Another upload is already publishing this job"}};
+ const creative=JSON.parse(run.creative_json||"{}"),digest=[...new Uint8Array(await crypto.subtle.digest("SHA-256",fileBytes))].map(b=>b.toString(16).padStart(2,"0")).join("");
+ const fail=async(message)=>{
+  await env.DB.prepare("UPDATE workflow_runs SET status='failed',error_message=?,lock_until=NULL,completed_at=?,updated_at=? WHERE id=?").bind(safeText(message,300),now(),now(),run.id).run();
+  await wfEvent(env,run.id,"social","master","FAILED",message);
+  await audit(env,run.owner_user_id,"workflow_failed","workflow",run.id,actor,{stage:"video_publishing",error:safeText(message,300)});
+  return {status:502,body:{error:message}};
+ };
+ await wfEvent(env,run.id,"video","video","DONE","Video Editor ตัดต่อเสร็จและตรวจไฟล์ผ่าน · "+qc.width+"x"+qc.height+" · "+Number(qc.duration).toFixed(2)+" วินาที · "+qc.video_codec+"/"+qc.audio_codec+" · "+Math.round(fileBytes.byteLength/1024)+" KB",{qc,sha256:digest,bytes:fileBytes.byteLength});
+ await wfEvent(env,run.id,"video","social","HANDOFF","Video Editor ส่งไฟล์ MP4 ที่ตรวจแล้วให้แอดมินโซเชียล (sha256 "+digest.slice(0,12)+"…)");
+ const account=await env.DB.prepare("SELECT id,external_account_id,account_name,status,scopes_json,page_tasks_json,encrypted_access_token FROM social_accounts WHERE id=? AND owner_user_id=? AND platform='facebook'").bind(run.target_account_id,run.owner_user_id).first();
+ const readiness=account?facebookPublishReadiness(JSON.parse(account.scopes_json||"[]"),JSON.parse(account.page_tasks_json||"[]")):{ready:false,missing:["page not connected"]};
+ if(!account||account.status!=="connected"||!account.encrypted_access_token||!readiness.ready) return fail("Facebook Page is not authorized to publish: "+readiness.missing.join(", "));
+ await wfEvent(env,run.id,"social","social","WORKING","แอดมินโซเชียลกำลังอัปโหลดวิดีโอ 1 คลิป + แคปชันลงเพจ "+account.account_name);
+ const contentId=random(16),recordId=random(16),t0=now();
+ await env.DB.prepare("INSERT INTO content_items(id,owner_user_id,title,body,affiliate_url,disclosure,platforms_json,account_ids_json,status,created_at,updated_at,approved_at,approved_by) VALUES(?,?,?,?,?,?,?,?,'approved',?,?,?,?)")
+  .bind(contentId,run.owner_user_id,safeText("Video: "+(creative.hook_text||"clip"),240),creative.caption,null,"",JSON.stringify(["facebook"]),JSON.stringify([account.id]),t0,t0,t0,"video workflow (user-authorized single test post)").run();
+ await env.DB.prepare("UPDATE workflow_runs SET content_id=?,updated_at=? WHERE id=?").bind(contentId,now(),run.id).run();
+ await env.DB.prepare("INSERT INTO publish_records(id,owner_user_id,content_id,account_id,platform,idempotency_key,status,created_at,updated_at) VALUES(?,?,?,?,?,?,'publishing',?,?)")
+  .bind(recordId,run.owner_user_id,contentId,account.id,"facebook","wfv_"+run.id,now(),now()).run();
+ const mark=async(status,message)=>env.DB.prepare("UPDATE publish_records SET status=?,error_message=?,updated_at=? WHERE id=?").bind(status,safeText(message,300),now(),recordId).run();
+ const token=await decrypt(account.encrypted_access_token,env),proof=await appSecretProof(env,token);
+ const form=new FormData();
+ form.set("access_token",token); if(proof) form.set("appsecret_proof",proof);
+ form.set("description",creative.caption); form.set("title",safeText(creative.hook_text||"",120)); form.set("published","true");
+ form.set("source",new Blob([fileBytes],{type:"video/mp4"}),"clip.mp4");
+ let res,meta;
+ try { res=await fetch("https://graph-video.facebook.com/"+graphVersion(env)+"/"+encodeURIComponent(account.external_account_id)+"/videos",{method:"POST",body:form,headers:{Accept:"application/json"}}); meta=await res.json().catch(()=>({})); }
+ catch { await mark("unknown","Network error after the video upload request; check the Page before retrying"); return fail("The connection ended before Facebook confirmed the video; it may exist. Not retried."); }
+ if(!res.ok||meta.error||!meta.id) { const m=safeText(meta.error?.message||"Facebook did not return a video ID",300); await mark("failed",m); return fail("Facebook rejected the video: "+m); }
+ const videoId=String(meta.id);
+ let permalink=null;
+ try { const v=await graphGet(env,videoId,{fields:"permalink_url",access_token:token}); permalink=v.permalink_url?(String(v.permalink_url).startsWith("http")?v.permalink_url:"https://www.facebook.com"+v.permalink_url):null; } catch {}
+ const done=now();
+ await env.DB.prepare("UPDATE publish_records SET status='published',external_post_id=?,permalink=?,updated_at=? WHERE id=?").bind(videoId,permalink,done,recordId).run();
+ await env.DB.prepare("UPDATE content_items SET status='published',updated_at=? WHERE id=?").bind(done,contentId).run();
+ await env.DB.prepare("UPDATE workflow_runs SET status='completed',stage='published',post_id=?,permalink=?,lock_until=NULL,completed_at=?,updated_at=? WHERE id=?").bind(videoId,permalink,done,done,run.id).run();
+ await audit(env,run.owner_user_id,"facebook_post_published","content",contentId,actor,{account_id:account.id,post_id:videoId,permalink,post_kind:"video",workflow_run:run.id,sha256:digest});
+ await wfEvent(env,run.id,"social","master","DONE","แอดมินโซเชียลโพสต์วิดีโอสำเร็จ · Video ID "+videoId,{post_id:videoId,permalink});
+ await wfEvent(env,run.id,"master","user","COMPLETED","Workflow คลิปวิดีโอเสร็จสมบูรณ์ · Facebook ยืนยันวิดีโอแล้ว"+(permalink?" · "+permalink:""),{post_id:videoId,permalink});
+ return {status:200,body:{published:true,video_id:videoId,permalink,sha256:digest}};
+}
+async function handleRenderNode(request,env,path,method) {
+ if(!await renderTokenOk(request,env)) return json({error:"Render token required"},401);
+ if(method==="GET"&&path==="/video-jobs") {
+  const {results=[]}=await env.DB.prepare(WF_VIDEO_JOB_SQL+" WHERE r.status='running' AND r.stage='video_awaiting_render' ORDER BY r.created_at LIMIT 5").all();
+  return json({jobs:results.filter(r=>wfIsVideo(r.command)).map(wfVideoJobView)});
+ }
+ const m=path.match(/^\/video-jobs\/([a-zA-Z0-9_-]+)(?:\/(keyframe|events|publish|fail))?$/);
+ if(!m) return json({error:"Not found"},404);
+ const job=await wfVideoJob(env,m[1]);
+ if(!job) return json({error:"Video job not found"},404);
+ if(method==="GET"&&!m[2]) return json({job:wfVideoJobView(job)});
+ if(method==="GET"&&m[2]==="keyframe") {
+  const a=await env.DB.prepare("SELECT data_b64,mime FROM workflow_assets WHERE run_id=? AND kind='cover'").bind(job.id).first();
+  if(!a) return json({error:"Keyframe not found"},404);
+  return new Response(Uint8Array.from(atob(a.data_b64),c=>c.charCodeAt(0)),{headers:{"Content-Type":a.mime,"Cache-Control":"no-store"}});
+ }
+ if(method==="POST"&&(m[2]==="events"||m[2]==="fail")) {
+  if(job.status!=="running"||job.stage!=="video_awaiting_render") return json({error:"Video job is not waiting for a render"},409);
+  const b=await request.json().catch(()=>({}));
+  const message=safeText(String(b.message||"").trim(),600);
+  if(!message) return json({error:"message is required"},422);
+  if(m[2]==="fail") {
+   await env.DB.prepare("UPDATE workflow_runs SET status='failed',error_message=?,completed_at=?,updated_at=? WHERE id=?").bind(safeText("Video Editor: "+message,300),now(),now(),job.id).run();
+   await wfEvent(env,job.id,"video","master","FAILED","Video Editor หยุดงาน ไม่ได้โพสต์: "+message);
+   await audit(env,job.owner_user_id,"workflow_failed","workflow",job.id,"video_render_node",{stage:job.stage,error:message});
+   return json({failed:true});
+  }
+  const status=["WORKING","QC"].includes(b.status)?b.status:"WORKING";
+  await wfEvent(env,job.id,"video","video",status,message,b.detail&&typeof b.detail==="object"?b.detail:null);
+  return json({logged:true});
+ }
+ if(method==="POST"&&m[2]==="publish") {
+  const form=await request.formData().catch(()=>null);
+  const file=form?.get("video");
+  if(!file||typeof file==="string") return json({error:"multipart field 'video' (MP4) is required"},422);
+  let qc=null; try { qc=JSON.parse(String(form.get("qc")||"")); } catch {}
+  const r=await wfVideoPublish(env,job.id,new Uint8Array(await file.arrayBuffer()),qc);
+  return json(r.body,r.status);
+ }
+ return json({error:"Not found"},404);
+}
 export async function wfAdvance(env,runId,ownerId,actor) {
  const stamp=now(),lock=new Date(Date.now()+WF_LOCK_MS).toISOString();
- const claim=await env.DB.prepare("UPDATE workflow_runs SET lock_until=?,updated_at=? WHERE id=? AND owner_user_id=? AND status='running' AND (lock_until IS NULL OR lock_until<?)").bind(lock,stamp,runId,ownerId,stamp).run();
+ // Video runs waiting for (or being published by) the render node are not advanced here.
+ const claim=await env.DB.prepare("UPDATE workflow_runs SET lock_until=?,updated_at=? WHERE id=? AND owner_user_id=? AND status='running' AND stage NOT IN ('video_awaiting_render','video_publishing') AND (lock_until IS NULL OR lock_until<?)").bind(lock,stamp,runId,ownerId,stamp).run();
  if((claim.meta?.changes||0)!==1) return false;
  const run=await env.DB.prepare("SELECT * FROM workflow_runs WHERE id=?").bind(runId).first();
  try { await wfStep(env,run,actor); }
@@ -789,7 +979,7 @@ export async function runCampaignScheduler(env,now=new Date(),bank=CAMPAIGN_BANK
 }
 export async function runScheduledWorkflows(env) {
  const stamp=now(),stale=new Date(Date.now()-60000).toISOString();
- const {results=[]}=await env.DB.prepare("SELECT id,owner_user_id FROM workflow_runs WHERE status='running' AND (lock_until IS NULL OR lock_until<?) AND updated_at<? ORDER BY created_at LIMIT 3").bind(stamp,stale).all();
+ const {results=[]}=await env.DB.prepare("SELECT id,owner_user_id FROM workflow_runs WHERE status='running' AND stage NOT IN ('video_awaiting_render','video_publishing') AND (lock_until IS NULL OR lock_until<?) AND updated_at<? ORDER BY created_at LIMIT 3").bind(stamp,stale).all();
  for(const r of results) {
   for(let i=0;i<7;i++) {
    if(!await wfAdvance(env,r.id,r.owner_user_id,"workflow_cron")) break;
@@ -976,6 +1166,7 @@ async function handle(request,env) {
   if(!user||await passwordHash(body.password||"",user.password_salt,env)!==user.password_hash) return json({error:"Invalid email or password"},401,cors(request));
   return json(await newSession(env,user),200,cors(request));
  }
+ if(path==="/video-jobs"||path.startsWith("/video-jobs/")) return handleRenderNode(request,env,path,method);
  const user=await sessionUser(request,env);
  if(!user) return json({error:"Authentication required"},401,cors(request));
  if(method==="GET"&&path==="/auth/me") return json({user},200,cors(request));

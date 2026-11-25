@@ -2805,7 +2805,7 @@
         // CLOUD CREATIVE WORKFLOW (real): Master Bot -> Creative Bot -> Graphic Design -> แอดมินโซเชียล
         // The Cloud Worker runs each stage; the browser drives /advance and polls timestamped events.
         // ==========================================
-        const WF_AGENT_NAMES = {user:'ผู้ใช้งาน (Admin)', master:'Master Bot', creative:'Creative Bot', graphic:'Graphic Design', social:'แอดมินโซเชียล'};
+        const WF_AGENT_NAMES = {user:'ผู้ใช้งาน (Admin)', master:'Master Bot', creative:'Creative Bot', graphic:'Graphic Design', video:'Video Editor', social:'แอดมินโซเชียล'};
         const WF_PATH = [['user','openbot'],['openbot','master'],['master','creative'],['creative','graphic'],['graphic','social'],['social','master']];
         let wfActiveRunId = null;
         // Run registry (source of truth = Cloud D1 workflow_runs / workflow_events). Survives a page refresh because
@@ -2825,7 +2825,7 @@
         function isCreativeWorkflowIntent(text) {
             const value = String(text || '');
             if (/ไม่ต้อง|อย่า|ห้าม|ยกเลิก/.test(value)) return false;
-            return /(creative|ครีเอทีฟ|คอนเซปต์|กราฟิก|graphic|ภาพปก|แบนเนอร์|banner|ภาพประกอบ|คอนเทนต์|content|workflow)/i.test(value)
+            return /(creative|ครีเอทีฟ|คอนเซปต์|กราฟิก|graphic|ภาพปก|แบนเนอร์|banner|ภาพประกอบ|คอนเทนต์|content|workflow|\[video\]|video editor)/i.test(value)
                 && /(โพส|post|publish|เพจ|facebook|เฟซบุ๊ก)/i.test(value);
         }
         function wfTime(iso) { const d = new Date(iso); return isNaN(d) ? '' : d.toTimeString().split(' ')[0]; }
@@ -2856,7 +2856,9 @@
             if (runId) logWorkflowEvent(e, runId, false);
             else addActivityLog(WF_AGENT_NAMES[from] || from, WF_AGENT_NAMES[to] || to, '[LIVE ' + e.status + '] ' + e.message, 'MEDIA', taskId, e.created_at);
             const owner = WF_AGENT_NAMES[to] || WF_AGENT_NAMES[from];
-            const progress = {RECEIVED:5, TARGET:8, HANDOFF:{creative:25, graphic:45, social:85}[to] || 30, DONE: from === 'graphic' ? 55 : 95, UPLOADED:92, COMPLETED:100}[e.status];
+            if (e.status === 'HANDOFF' && to === 'video') setConnection('graphic', 'video', true);
+            if (e.status === 'HANDOFF' && from === 'video') setConnection('video', 'social', true);
+            const progress = {RECEIVED:5, TARGET:8, HANDOFF:{creative:25, graphic:45, video:60, social:85}[to] || 30, DONE: from === 'graphic' ? 55 : 95, UPLOADED:92, COMPLETED:100}[e.status];
             if (progress) updateTaskProgress(taskId, owner, progress);
             if (e.status === 'RECEIVED') { setConnection('user', 'openbot', true); setConnection('openbot', 'master', true); updateAgentState('user', 'TALKING', taskId, 'ส่งคำสั่งให้ Master Bot'); updateAgentState('master', 'WORKING', taskId, 'รับคำสั่ง'); }
             if (e.status === 'WORKING') updateAgentState(from, 'WORKING', taskId, e.message);
@@ -2931,7 +2933,7 @@
             try { view = await scRequest('/workflows', {method:'POST', body:JSON.stringify({command})}); }
             catch (error) { appendChatBubble('bot', 'เริ่ม Workflow ไม่สำเร็จ: ' + error.message); return; }
             const run = view.run, taskId = wfTaskId(run.id);
-            appendChatBubble('bot', 'รับคำสั่งแล้ว · เริ่ม Workflow จริงบน Cloud (' + taskId + ')\nMaster Bot → Creative Bot → Graphic Design → แอดมินโซเชียล → เพจ "' + (run.account_name || '-') + '"');
+            appendChatBubble('bot', 'รับคำสั่งแล้ว · เริ่ม Workflow จริงบน Cloud (' + taskId + ')\nMaster Bot → Creative Bot → Graphic Design → ' + (/\[video\]|video editor/i.test(command) ? 'Video Editor (render node) → ' : '') + 'แอดมินโซเชียล → เพจ "' + (run.account_name || '-') + '"');
             await wfFollowRun(view, { resumed: false });
         }
 

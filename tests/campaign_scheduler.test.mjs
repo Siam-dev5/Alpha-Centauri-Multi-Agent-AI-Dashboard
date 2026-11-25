@@ -66,12 +66,12 @@ const ALL = [...BANK.week1, ...BANK.reserves];
 
 test("slots map 10:30 and 17:30 Asia/Bangkok to 03:30 and 10:30 UTC, with a 60-minute window", () => {
   assert.deepEqual(CAMPAIGN_SLOTS_UTC.map(s => s.label + "=" + s.h + ":" + s.m), ["10:30=3:30", "17:30=10:30"]);
-  assert.equal(campaignDueSlot(at("2026-11-25T03:29:59Z")), null);
-  assert.equal(campaignDueSlot(at("2026-11-25T03:30:00Z")).key, "2026-11-25@10:30");
-  assert.equal(campaignDueSlot(at("2026-11-25T04:29:00Z")).key, "2026-11-25@10:30");
-  assert.equal(campaignDueSlot(at("2026-11-25T04:30:00Z")), null);
-  assert.equal(campaignDueSlot(at("2026-11-25T10:35:00Z")).key, "2026-11-25@17:30");
-  assert.equal(campaignDueSlot(at("2026-11-25T17:00:00Z")), null);
+  assert.equal(campaignDueSlot(at("2031-03-25T03:29:59Z")), null);
+  assert.equal(campaignDueSlot(at("2031-03-25T03:30:00Z")).key, "2031-03-25@10:30");
+  assert.equal(campaignDueSlot(at("2031-03-25T04:29:00Z")).key, "2031-03-25@10:30");
+  assert.equal(campaignDueSlot(at("2031-03-25T04:30:00Z")), null);
+  assert.equal(campaignDueSlot(at("2031-03-25T10:35:00Z")).key, "2031-03-25@17:30");
+  assert.equal(campaignDueSlot(at("2031-03-25T17:00:00Z")), null);
 });
 
 test("pickNextCampaignItem returns the first content ID never used (week first, then reserves)", () => {
@@ -84,7 +84,7 @@ test("pickNextCampaignItem returns the first content ID never used (week first, 
 test("off by default: no run, no AI call, no post", async (t) => {
   const { db, env, posts } = await setup(t, { enabled: false });
   const before = ai.calls;
-  assert.deepEqual(await runCampaignScheduler(env, at("2026-11-25T03:31:00Z")), { skipped: "disabled" });
+  assert.deepEqual(await runCampaignScheduler(env, at("2031-03-25T03:31:00Z")), { skipped: "disabled" });
   assert.equal(db.prepare("SELECT COUNT(*) n FROM workflow_runs").get().n, 0);
   assert.equal(ai.calls, before);
   assert.equal(posts.length, 0);
@@ -92,27 +92,27 @@ test("off by default: no run, no AI call, no post", async (t) => {
 
 test("a due slot posts exactly once, server-side, with the next unused CID", async (t) => {
   const { db, env, posts } = await setup(t);
-  const r = await runCampaignScheduler(env, at("2026-11-25T03:31:00Z"));
+  const r = await runCampaignScheduler(env, at("2031-03-25T03:31:00Z"));
   assert.equal(r.status, "completed", JSON.stringify(r));
   assert.equal(r.cid, "W1-01");
   assert.equal(posts.length, 1);
   assert.ok(posts[0].includes("สนใจ"), "CTA guard still applies");
-  const again = await runCampaignScheduler(env, at("2026-11-25T03:36:00Z"));
+  const again = await runCampaignScheduler(env, at("2031-03-25T03:36:00Z"));
   assert.equal(again.skipped, "slot already handled");
   assert.equal(posts.length, 1, "the next cron tick in the same slot posts nothing");
   assert.equal(db.prepare("SELECT COUNT(*) n FROM audit_events WHERE event_type='campaign_slot'").get().n, 1);
-  const evening = await runCampaignScheduler(env, at("2026-11-25T10:31:00Z"));
+  const evening = await runCampaignScheduler(env, at("2031-03-25T10:31:00Z"));
   assert.equal(evening.cid, "W1-02");
   assert.equal(posts.length, 2);
-  assert.equal((await runCampaignScheduler(env, at("2026-11-25T12:00:00Z"))).skipped, "no slot due");
+  assert.equal((await runCampaignScheduler(env, at("2031-03-25T12:00:00Z"))).skipped, "no slot due");
 });
 
 test("a slot already posted by the OpenBot routine (any run since slot-30min) is not posted again", async (t) => {
   const { db, env, posts } = await setup(t);
   const api = new Request("https://social-api.siamhrbp.com/api/social-commerce/workflows", { method: "POST", headers: { Authorization: "Bearer session-token", "Content-Type": "application/json" }, body: JSON.stringify({ command: BANK.week1[2].command }) });
   await worker.fetch(api, env);
-  db.prepare("UPDATE workflow_runs SET created_at='2026-11-25T03:20:00Z'").run();
-  const r = await runCampaignScheduler(env, at("2026-11-25T03:35:00Z"));
+  db.prepare("UPDATE workflow_runs SET created_at='2031-03-25T03:20:00Z'").run();
+  const r = await runCampaignScheduler(env, at("2031-03-25T03:35:00Z"));
   assert.equal(r.skipped, "slot already has a run");
   assert.equal(posts.length, 0);
 });
@@ -127,16 +127,16 @@ test("content IDs are never reused across days; an exhausted bank posts nothing"
   assert.equal(posts.length, ALL.length);
   const cids = db.prepare("SELECT command FROM workflow_runs").all().map(r => r.command.match(/\[CID:([^\]]+)\]/)[1]);
   assert.equal(new Set(cids).size, ALL.length, "21 distinct content IDs");
-  const r = await runCampaignScheduler(env, at("2026-12-20T03:31:00Z"));
+  const r = await runCampaignScheduler(env, at("2031-04-20T03:31:00Z"));
   assert.equal(r.error, "content bank exhausted");
   assert.equal(posts.length, ALL.length);
 });
 
 test("a Facebook error fails the run once; the slot is not retried and nothing double-posts", async (t) => {
   const { env, posts } = await setup(t, { feedError: "(#200) test failure" });
-  const r = await runCampaignScheduler(env, at("2026-11-25T03:31:00Z"));
+  const r = await runCampaignScheduler(env, at("2031-03-25T03:31:00Z"));
   assert.equal(r.status, "failed");
-  assert.equal((await runCampaignScheduler(env, at("2026-11-25T03:40:00Z"))).skipped, "slot already handled");
+  assert.equal((await runCampaignScheduler(env, at("2031-03-25T03:40:00Z"))).skipped, "slot already handled");
   assert.equal(posts.length, 0);
 });
 
@@ -144,7 +144,7 @@ test("the scheduled() handler runs the campaign when enabled", async (t) => {
   const { env, posts } = await setup(t);
   const pending = [];
   const RealDate = Date;
-  globalThis.Date = class extends RealDate { constructor(...a) { super(...(a.length ? a : ["2026-11-25T03:32:00Z"])); } static now() { return new RealDate("2026-11-25T03:32:00Z").getTime(); } };
+  globalThis.Date = class extends RealDate { constructor(...a) { super(...(a.length ? a : ["2031-03-25T03:32:00Z"])); } static now() { return new RealDate("2031-03-25T03:32:00Z").getTime(); } };
   t.after(() => { globalThis.Date = RealDate; });
   await worker.scheduled({}, env, { waitUntil: (p) => pending.push(p) });
   await Promise.allSettled(pending);
