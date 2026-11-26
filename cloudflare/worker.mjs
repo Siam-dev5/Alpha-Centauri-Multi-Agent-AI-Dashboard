@@ -196,6 +196,55 @@ async function tiktokAccessToken(env,account) {
  return token.access_token;
 }
 const TIKTOK_ACCOUNT_SQL="SELECT id,owner_user_id,external_account_id,account_name,status,scopes_json,page_tasks_json,token_expires_at,encrypted_access_token,encrypted_refresh_token FROM social_accounts";
+// ---- TikTok "Upload to TikTok" (inbox draft, scope video.upload). Allowed for unaudited/sandbox apps: the clip lands in the
+// creator's TikTok inbox and the creator finishes and posts it in the TikTok app. Nothing is published by this code.
+// Docs: developers.tiktok.com/doc/content-posting-api-reference-upload-video, /doc/content-posting-api-media-transfer-guide
+const TIKTOK_MAX_SINGLE_CHUNK=64*1024*1024;
+export function tiktokInboxProblems(account,bytes) {
+ const p=[];
+ if(!account) return ["no connected TikTok account"];
+ if(account.status!=="connected") p.push("TikTok account is "+account.status+"; reconnect it");
+ if(!JSON.parse(account.scopes_json||"[]").includes("video.upload")) p.push("TikTok account was not authorized for video.upload; reconnect TikTok after enabling Content Posting API (Upload) for the app");
+ if(!(bytes>=50*1024&&bytes<=TIKTOK_MAX_SINGLE_CHUNK)) p.push("video must be 50 KB–64 MB (single chunk), got "+bytes+" bytes");
+ return p;
+}
+async function tiktokInboxUpload(env,user,body,key) {
+ if(!/^[A-Za-z0-9_.:-]{4,80}$/.test(String(key||""))) return {status:422,body:{error:"Idempotency-Key header (4–80 chars) is required"}};
+ const prior=await env.DB.prepare("SELECT details_json FROM audit_events WHERE owner_user_id=? AND event_type='tiktok_inbox_upload' AND entity_id=?").bind(user.id,key).first();
+ if(prior) return {status:409,body:{error:"This Idempotency-Key was already uploaded; not sent again",previous:JSON.parse(prior.details_json||"{}")}};
+ const bytes=new Uint8Array(body);
+ const {results:accs=[]}=await env.DB.prepare(TIKTOK_ACCOUNT_SQL+" WHERE owner_user_id=? AND platform='tiktok' AND status='connected'").bind(user.id).all();
+ if(accs.length>1) return {status:409,body:{error:"Several TikTok accounts are connected; keep only one"}};
+ const account=accs[0];
+ const head=String.fromCharCode(...bytes.subarray(4,8));
+ const problems=tiktokInboxProblems(account,bytes.byteLength);
+ if(head!=="ftyp") problems.push("file is not an MP4");
+ if(problems.length) return {status:422,body:{error:"Not sent to TikTok",problems}};
+ const token=await tiktokAccessToken(env,account);
+ const init=await fetch(TIKTOK_API+"/post/publish/inbox/video/init/",{method:"POST",headers:{Authorization:"Bearer "+token,"Content-Type":"application/json; charset=UTF-8"},body:JSON.stringify({source_info:{source:"FILE_UPLOAD",video_size:bytes.byteLength,chunk_size:bytes.byteLength,total_chunk_count:1}})});
+ const ij=await init.json().catch(()=>({}));
+ if(!init.ok||(ij.error&&ij.error.code!=="ok")||!ij.data?.upload_url) {
+  const m=safeText(ij.error?.message||ij.error?.code||init.statusText||"init failed",240);
+  await audit(env,user.id,"tiktok_inbox_upload_failed","tiktok",key,user.email,{stage:"init",error:m});
+  return {status:502,body:{error:"TikTok init failed: "+m}};
+ }
+ // Record the attempt before the transfer so a retry with the same key can never send a second draft.
+ await audit(env,user.id,"tiktok_inbox_upload","tiktok",key,user.email,{publish_id:ij.data.publish_id,bytes:bytes.byteLength,account:account.account_name});
+ const put=await fetch(ij.data.upload_url,{method:"PUT",headers:{"Content-Type":"video/mp4","Content-Length":String(bytes.byteLength),"Content-Range":"bytes 0-"+(bytes.byteLength-1)+"/"+bytes.byteLength},body:bytes});
+ if(!(put.status===201||put.ok)) {
+  await audit(env,user.id,"tiktok_inbox_upload_failed","tiktok",key,user.email,{stage:"upload",http:put.status,publish_id:ij.data.publish_id});
+  return {status:502,body:{error:"TikTok upload failed with HTTP "+put.status,publish_id:ij.data.publish_id}};
+ }
+ const st=await tiktokPublishStatus(env,account,ij.data.publish_id).catch(e=>({error:safeText(e?.message,200)}));
+ return {status:200,body:{sent:true,mode:"inbox_draft",account:account.account_name,publish_id:ij.data.publish_id,status:st}};
+}
+async function tiktokPublishStatus(env,account,publishId) {
+ const token=await tiktokAccessToken(env,account);
+ const r=await fetch(TIKTOK_API+"/post/publish/status/fetch/",{method:"POST",headers:{Authorization:"Bearer "+token,"Content-Type":"application/json; charset=UTF-8"},body:JSON.stringify({publish_id:publishId})});
+ const j=await r.json().catch(()=>({}));
+ if(!r.ok||(j.error&&j.error.code!=="ok")) throw new Error("TikTok status failed: "+safeText(j.error?.message||j.error?.code||r.statusText,200));
+ return j.data||{};
+}
 async function verifyTikTokAccount(env,user,accountId) {
  const account=await env.DB.prepare(TIKTOK_ACCOUNT_SQL+" WHERE id=? AND owner_user_id=? AND platform='tiktok'").bind(accountId,user.id).first();
  if(!account) return {status:404,body:{error:"TikTok account not found"}};
@@ -1218,6 +1267,13 @@ async function handle(request,env) {
  if(sellerShop&&method==="POST"&&sellerShop[2]) { const r=await shopeeSeller.verify(env,user,sellerShop[1]); return json(r.body,r.status,cors(request)); }
  if(sellerShop&&method==="DELETE"&&!sellerShop[2]) { const r=await shopeeSeller.disconnect(env,user,sellerShop[1]); return json(r.body,r.status,cors(request)); }
  if(method==="POST"&&path==="/affiliate/shopee/connect") { const r=await connectShopeeAffiliate(env,user); return json(r.body,r.status,cors(request)); }
+ if(method==="POST"&&path==="/tiktok/inbox-upload") { const r=await tiktokInboxUpload(env,user,await request.arrayBuffer(),request.headers.get("Idempotency-Key")); return json(r.body,r.status,cors(request)); }
+ if(method==="POST"&&path==="/tiktok/publish-status") {
+  const b=await request.json().catch(()=>({}));
+  const account=await env.DB.prepare(TIKTOK_ACCOUNT_SQL+" WHERE owner_user_id=? AND platform='tiktok' AND status='connected'").bind(user.id).first();
+  if(!account||!b.publish_id) return json({error:"publish_id and a connected TikTok account are required"},422,cors(request));
+  try { return json(await tiktokPublishStatus(env,account,String(b.publish_id)),200,cors(request)); } catch(e) { return json({error:safeText(e?.message,240)},502,cors(request)); }
+ }
  const accountVerify=path.match(/^\/accounts\/([a-zA-Z0-9_-]+)\/verify$/);
  if(method==="POST"&&accountVerify) { const r=await verifyAccount(env,user,accountVerify[1]); return json(r.body,r.status,cors(request)); }
  if(method==="GET"&&path==="/accounts") {
