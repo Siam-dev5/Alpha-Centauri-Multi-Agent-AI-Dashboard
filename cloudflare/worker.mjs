@@ -502,6 +502,10 @@ export async function runScheduledAutoLike(env) {
 const WF_TEXT_MODEL="@cf/aisingapore/gemma-sea-lion-v4-27b-it";
 const WF_IMAGE_SQUARE_MODEL="@cf/black-forest-labs/flux-1-schnell";
 const WF_IMAGE_WIDE_MODEL="@cf/leonardo/lucid-origin";
+// WF_ECONOMY_IMAGES="on": use FLUX schnell (~250 neurons/image) instead of Lucid Origin (~3,300–7,000 neurons/image)
+// so several daily posts fit Workers AI's free 10,000 neurons per rolling 24 h. FLUX schnell renders square images.
+export const wfEconomyImages=(env)=>String(env?.WF_ECONOMY_IMAGES||"").trim().toLowerCase()==="on";
+export const wfWideModel=(env)=>wfEconomyImages(env)?WF_IMAGE_SQUARE_MODEL:WF_IMAGE_WIDE_MODEL;
 const WF_LOCK_MS=180000;
 const WF_ASSETS=[
  {kind:"cover",from:"creative_done",to:"graphic_cover",label:"ภาพปก",model:WF_IMAGE_SQUARE_MODEL,width:1024,height:1024,promptKey:"cover_prompt"},
@@ -560,6 +564,8 @@ const wfImagePrompt=(p)=>safeText(p,900)+", professional social media visual, cl
 // renders, checks the file and hands it over. The MP4 is streamed to Facebook and not stored in D1.
 // Exact wording: TEXT:"..." (on-screen hook) and VO:"..." (voice-over) in the command are used verbatim.
 export const WF_VIDEO_SPEC={width:1080,height:1920,duration:6,fps:30};
+// VIDEO_MAX_SECONDS (default 6.6, capped at 20): longer two-part clips such as the ~12 s Clip 2 format need e.g. "15".
+export const wfVideoMaxSeconds=(env)=>{ const v=Number(env?.VIDEO_MAX_SECONDS); return Number.isFinite(v)&&v>=6.6?Math.min(v,20):6.6; };
 export const wfIsVideo=(command)=>/\[VIDEO\]|video\s*editor/i.test(String(command||""));
 export function wfVideoDirectives(command) {
  const text=String(command||"");
@@ -578,13 +584,13 @@ export function wfSubtitleLines(vo) {
  return [s.slice(0,cut).trim(),s.slice(cut).trim()].filter(Boolean);
 }
 const wfVideoKeyframePrompt=(p)=>safeText(p,700)+", vertical 9:16 composition, cinematic dark modern corporate office at night, neon cyan and magenta accent lights, glowing floating resume documents in the air, open empty space in the lower center for a person to be composited, no people, no person, no human, no text, no letters, no words, no logos, no watermark, high detail";
-export function wfVideoQcProblems(qc,size,head) {
+export function wfVideoQcProblems(qc,size,head,maxSeconds=6.6) {
  const p=[];
  if(!(size>=50*1024&&size<=25*1024*1024)) p.push("file size "+size+" bytes is outside 50 KB–25 MB");
  if(!head||String.fromCharCode(...head.slice(4,8))!=="ftyp") p.push("file is not an MP4 (no ftyp box)");
  const q=qc&&typeof qc==="object"?qc:{};
  if(q.width!==WF_VIDEO_SPEC.width||q.height!==WF_VIDEO_SPEC.height) p.push("resolution must be 1080x1920 (9:16), got "+q.width+"x"+q.height);
- if(!(Number(q.duration)>=5.5&&Number(q.duration)<=6.6)) p.push("duration must be about 6 s, got "+q.duration);
+ if(!(Number(q.duration)>=5.5&&Number(q.duration)<=maxSeconds)) p.push("duration must be 5.5–"+maxSeconds+" s, got "+q.duration);
  if(q.video_codec!=="h264") p.push("video codec must be h264");
  if(q.audio_codec!=="aac"||!q.has_audio) p.push("an AAC audio track (voice-over) is required");
  if(!q.subtitles_burned_in) p.push("Thai subtitles must be burned in");
@@ -666,8 +672,9 @@ async function wfStep(env,run,actor) {
  if(assetStep) {
   const prompt=wfImagePrompt(creative[assetStep.promptKey]);
   await wfEvent(env,run.id,"graphic","graphic","WORKING","Graphic Design กำลังสร้าง"+assetStep.label+" "+assetStep.width+"x"+assetStep.height+" ("+assetStep.model+")");
-  const input=assetStep.model===WF_IMAGE_WIDE_MODEL?{prompt,width:assetStep.width,height:assetStep.height,num_steps:20}:{prompt,steps:6};
-  const b64=await wfImageBase64(await env.AI.run(assetStep.model,input));
+  const model=assetStep.model===WF_IMAGE_WIDE_MODEL?wfWideModel(env):assetStep.model;
+  const input=model===WF_IMAGE_WIDE_MODEL?{prompt,width:assetStep.width,height:assetStep.height,num_steps:20}:{prompt,steps:6};
+  const b64=await wfImageBase64(await env.AI.run(model,input));
   const bytes=Math.floor(b64.length*3/4);
   await env.DB.prepare("INSERT OR IGNORE INTO workflow_assets(id,run_id,kind,prompt,model,mime,width,height,bytes,data_b64,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)")
    .bind(random(12),run.id,assetStep.kind,prompt,assetStep.model,"image/jpeg",assetStep.width,assetStep.height,bytes,b64,now()).run();
@@ -782,10 +789,11 @@ async function wfVideoStep(env,run,account,plan) {
  if(run.stage==="creative_done") {
   const creative=JSON.parse(run.creative_json||"{}"),prompt=wfVideoKeyframePrompt(creative.keyframe_prompt);
   await wfEvent(env,run.id,"graphic","graphic","WORKING","Graphic Design กำลังสร้างฉากหลังแนวตั้ง 1080x1920 ("+WF_IMAGE_WIDE_MODEL+")");
-  const b64=await wfImageBase64(await env.AI.run(WF_IMAGE_WIDE_MODEL,{prompt,width:WF_VIDEO_SPEC.width,height:WF_VIDEO_SPEC.height,num_steps:20}));
+  const vm=wfWideModel(env);
+  const b64=await wfImageBase64(await env.AI.run(vm,vm===WF_IMAGE_WIDE_MODEL?{prompt,width:WF_VIDEO_SPEC.width,height:WF_VIDEO_SPEC.height,num_steps:20}:{prompt,steps:6}));
   const bytes=Math.floor(b64.length*3/4);
   await env.DB.prepare("INSERT OR IGNORE INTO workflow_assets(id,run_id,kind,prompt,model,mime,width,height,bytes,data_b64,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)")
-   .bind(random(12),run.id,"cover",prompt,WF_IMAGE_WIDE_MODEL,"image/jpeg",WF_VIDEO_SPEC.width,WF_VIDEO_SPEC.height,bytes,b64,now()).run();
+   .bind(random(12),run.id,"cover",prompt,vm,"image/jpeg",WF_VIDEO_SPEC.width,WF_VIDEO_SPEC.height,bytes,b64,now()).run();
   await env.DB.prepare("UPDATE workflow_runs SET stage='video_awaiting_render',updated_at=? WHERE id=?").bind(now(),run.id).run();
   await wfEvent(env,run.id,"graphic","graphic","DONE","สร้างฉากหลังคลิปเสร็จ (1080x1920, "+Math.round(bytes/1024)+" KB)",{kind:"cover",role:"video_keyframe"});
   await wfEvent(env,run.id,"graphic","video","HANDOFF","Graphic Design ส่งฉากหลัง + ข้อความบนจอ + VO + ซับให้ Video Editor · รอ render node ตัดต่อและตรวจไฟล์");
@@ -810,7 +818,7 @@ export async function wfVideoPublish(env,runId,fileBytes,qc,actor="video_render_
  const run=await wfVideoJob(env,runId);
  if(!run) return {status:404,body:{error:"Video job not found"}};
  if(run.status!=="running"||run.stage!=="video_awaiting_render") return {status:409,body:{error:"Video job is not waiting for a render (status "+run.status+", stage "+run.stage+")"}};
- const problems=wfVideoQcProblems(qc,fileBytes.byteLength,fileBytes.subarray(0,12));
+ const problems=wfVideoQcProblems(qc,fileBytes.byteLength,fileBytes.subarray(0,12),wfVideoMaxSeconds(env));
  if(problems.length) {
   await wfEvent(env,run.id,"video","video","QC_REJECTED","Worker ตรวจไฟล์ไม่ผ่าน ไม่ได้โพสต์: "+problems.join("; "),{qc});
   return {status:422,body:{error:"Video QC failed",problems}};
@@ -932,10 +940,22 @@ export async function wfView(env,runId,ownerId,after=0) {
 // Off unless CAMPAIGN_SCHEDULER="on". A slot is handled once: an audit "campaign_slot" claim, and any workflow run created
 // since 30 minutes before the slot (e.g. by the OpenBot routine) counts as that slot's post, so nothing posts twice.
 export const CAMPAIGN_SLOTS_UTC=[{label:"10:30",h:3,m:30},{label:"17:30",h:10,m:30}];
+// CAMPAIGN_SLOTS="09:30,17:30" (Asia/Bangkok, UTC+7, no DST) overrides the default 10:30/17:30. Invalid entries are ignored.
+export function campaignSlots(env) {
+ const raw=String(env?.CAMPAIGN_SLOTS||"").trim();
+ if(!raw) return CAMPAIGN_SLOTS_UTC;
+ const out=[];
+ for(const part of raw.split(/[\s,]+/)) {
+  const m=part.match(/^([01]?\d|2[0-3]):([0-5]\d)$/); if(!m) continue;
+  const mins=((Number(m[1])*60+Number(m[2])-7*60)%1440+1440)%1440;
+  out.push({label:m[1].padStart(2,"0")+":"+m[2],h:Math.floor(mins/60),m:mins%60});
+ }
+ return out.length?out:CAMPAIGN_SLOTS_UTC;
+}
 const CAMPAIGN_WINDOW_MS=60*60000, CAMPAIGN_FILL_LOOKBACK_MS=30*60000;
 export const campaignEnabled=(env)=>String(env.CAMPAIGN_SCHEDULER||"").trim().toLowerCase()==="on";
-export function campaignDueSlot(now=new Date()) {
- for(const s of CAMPAIGN_SLOTS_UTC) {
+export function campaignDueSlot(now=new Date(),slots=CAMPAIGN_SLOTS_UTC) {
+ for(const s of slots) {
   const start=Date.UTC(now.getUTCFullYear(),now.getUTCMonth(),now.getUTCDate(),s.h,s.m);
   if(now.getTime()>=start&&now.getTime()<start+CAMPAIGN_WINDOW_MS) {
    const bkk=new Date(start+7*3600000).toISOString().slice(0,10);
@@ -945,11 +965,11 @@ export function campaignDueSlot(now=new Date()) {
  return null;
 }
 export function pickNextCampaignItem(bank,usedCids) {
- return [...(bank.week1||[]),...(bank.reserves||[])].find(i=>i&&i.cid&&i.command&&!usedCids.has(i.cid))||null;
+ return [...(bank.week1||[]),...(bank.week2_3||[]),...(bank.reserves||[])].find(i=>i&&i.cid&&i.command&&!usedCids.has(i.cid))||null;
 }
 export async function runCampaignScheduler(env,now=new Date(),bank=CAMPAIGN_BANK) {
  if(!campaignEnabled(env)) return {skipped:"disabled"};
- const slot=campaignDueSlot(now);
+ const slot=campaignDueSlot(now,campaignSlots(env));
  if(!slot) return {skipped:"no slot due"};
  const claimed=await env.DB.prepare("SELECT id FROM audit_events WHERE event_type='campaign_slot' AND entity_id=?").bind(slot.key).first();
  if(claimed) return {slot:slot.key,skipped:"slot already handled"};
