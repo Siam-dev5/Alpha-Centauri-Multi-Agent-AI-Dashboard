@@ -62,7 +62,7 @@ async function setup(t, { enabled = true, feedError = null } = {}) {
   const env = { DB: d1(db), AI: ai, TOKEN_ENCRYPTION_KEY: b64(RAW_KEY), META_APP_SECRET: "secret", META_GRAPH_API_VERSION: "v27.0", ...(enabled ? { CAMPAIGN_SCHEDULER: "on" } : {}) };
   return { db, env, posts };
 }
-const ALL = [...BANK.week1, ...BANK.reserves];
+const ALL = [...BANK.week1, ...(BANK.week2_3 || []), ...BANK.reserves];
 
 test("slots map 10:30 and 17:30 Asia/Bangkok to 03:30 and 10:30 UTC, with a 60-minute window", () => {
   assert.deepEqual(CAMPAIGN_SLOTS_UTC.map(s => s.label + "=" + s.h + ":" + s.m), ["10:30=3:30", "17:30=10:30"]);
@@ -77,7 +77,8 @@ test("slots map 10:30 and 17:30 Asia/Bangkok to 03:30 and 10:30 UTC, with a 60-m
 test("pickNextCampaignItem returns the first content ID never used (week first, then reserves)", () => {
   assert.equal(pickNextCampaignItem(BANK, new Set()).cid, "W1-01");
   assert.equal(pickNextCampaignItem(BANK, new Set(["W1-01", "W1-02"])).cid, "W1-03");
-  assert.equal(pickNextCampaignItem(BANK, new Set(BANK.week1.map(i => i.cid))).cid, "R-01");
+  assert.equal(pickNextCampaignItem(BANK, new Set(BANK.week1.map(i => i.cid))).cid, "W2-01");
+  assert.equal(pickNextCampaignItem(BANK, new Set([...BANK.week1, ...BANK.week2_3].map(i => i.cid))).cid, "R-01");
   assert.equal(pickNextCampaignItem(BANK, new Set(ALL.map(i => i.cid))), null);
 });
 
