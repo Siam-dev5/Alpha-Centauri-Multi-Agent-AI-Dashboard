@@ -3,7 +3,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
-import worker, { tiktokInboxProblems } from "../cloudflare/worker.mjs";
+import worker, { tiktokInboxProblems, tiktokDraftCaption, TIKTOK_DEFAULT_HASHTAGS } from "../cloudflare/worker.mjs";
 
 const BASE = "https://social-api.siamhrbp.com/api/social-commerce";
 const b64 = (bytes) => Buffer.from(bytes).toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
@@ -92,6 +92,47 @@ test("a TikTok init error is reported and audited; no upload happens", async (t)
   assert.equal(r.status, 502);
   assert.deepEqual(calls.map(c => c.kind), ["init"]);
   assert.equal(db.prepare("SELECT COUNT(*) n FROM audit_events WHERE event_type='tiktok_inbox_upload_failed'").get().n, 1);
+});
+
+test("caption: title + line + CTA + hashtags, cleaned, deduped, ≤2200 chars; no title → null", () => {
+  const c = tiktokDraftCaption({ title: " คนเก่ง ≠ คนเหมาะ ", line: "เลือกคนที่ใช่\nกับทีม" });
+  const lines = c.split("\n");
+  assert.equal(lines[0], "คนเก่ง ≠ คนเหมาะ");
+  assert.equal(lines[1], "เลือกคนที่ใช่ กับทีม");
+  assert.match(lines[2], /สนใจ/);
+  assert.equal(lines[3], TIKTOK_DEFAULT_HASHTAGS.join(" "));
+  assert.equal(tiktokDraftCaption({ title: "A", hashtags: ["HR", "#HR", "two words"] }).split("\n").pop(), "#HR #twowords");
+  assert.ok(tiktokDraftCaption({ title: "x".repeat(5000), line: "y".repeat(5000) }).length <= 2200);
+  assert.equal(tiktokDraftCaption({ title: "  " }), null);
+});
+
+test("upload stores the caption but never sends it to TikTok (init body = source_info only)", async (t) => {
+  const { calls, env } = await setup(t);
+  const r = await worker.fetch(new Request(BASE + "/tiktok/inbox-upload?title=" + encodeURIComponent("หัวข้อทดสอบ") + "&line=" + encodeURIComponent("ประโยคเด็ด"), { method: "POST", headers: { Authorization: "Bearer session-token", "Idempotency-Key": "clip-cap" }, body: MP4 }), env);
+  const b = await r.json();
+  assert.equal(r.status, 200);
+  assert.equal(b.caption_prefilled, false);
+  assert.match(b.caption, /^หัวข้อทดสอบ\nประโยคเด็ด\n/);
+  assert.deepEqual(Object.keys(calls[0].body), ["source_info"]);
+  assert.ok(!JSON.stringify(calls[0].body).includes("หัวข้อ"));
+  const list = await (await worker.fetch(new Request(BASE + "/tiktok/drafts", { headers: { Authorization: "Bearer session-token" } }), env)).json();
+  assert.equal(list.drafts[0].caption, b.caption);
+});
+
+test("draft-caption attaches a caption to an existing draft only (no TikTok call); drafts lists the newest caption", async (t) => {
+  const { calls, env } = await setup(t);
+  await up(env, "clip-old");
+  const n = calls.length;
+  const post = (body) => worker.fetch(new Request(BASE + "/tiktok/draft-caption", { method: "POST", headers: { Authorization: "Bearer session-token", "Content-Type": "application/json" }, body: JSON.stringify(body) }), env);
+  assert.equal((await post({ publish_id: "nope", title: "x" })).status, 404);
+  assert.equal((await post({ publish_id: "v_inbox_1" })).status, 422);
+  const ok = await post({ publish_id: "v_inbox_1", title: "แคปชันใหม่" });
+  assert.equal(ok.status, 200);
+  assert.equal((await ok.json()).sent_to_tiktok, false);
+  assert.equal(calls.length, n, "no request to TikTok");
+  const list = await (await worker.fetch(new Request(BASE + "/tiktok/drafts", { headers: { Authorization: "Bearer session-token" } }), env)).json();
+  assert.equal(list.drafts.length, 1);
+  assert.match(list.drafts[0].caption, /^แคปชันใหม่\n/);
 });
 
 test("endpoints require a Dashboard session", async (t) => {
