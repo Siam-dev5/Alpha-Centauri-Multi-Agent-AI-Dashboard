@@ -208,7 +208,42 @@ export function tiktokInboxProblems(account,bytes) {
  if(!(bytes>=50*1024&&bytes<=TIKTOK_MAX_SINGLE_CHUNK)) p.push("video must be 50 KB–64 MB (single chunk), got "+bytes+" bytes");
  return p;
 }
-async function tiktokInboxUpload(env,user,body,key) {
+// The inbox video API has NO caption/hashtag field (body = source_info only), so the caption can't be pre-filled in the
+// TikTok draft. Fallback: build a ready caption per draft, keep it in the audit log and show it on the Dashboard with a
+// Copy button; the creator pastes it in the TikTok app. The caption is never sent to TikTok by this code.
+export const TIKTOK_DEFAULT_HASHTAGS=["#HR","#สรรหาว่าจ้าง","#Recruitment","#HRThailand","#คนทำงานHR"];
+export const TIKTOK_CAPTION_CTA="คอมเมนต์ \"สนใจ\" ถ้าอยากได้รายละเอียดเพิ่มเติม 👉 siamhrbp.com";
+export function tiktokDraftCaption({title,line,hashtags}={}) {
+ const clean=(v,max)=>String(v||"").replace(/[\u0000-\u0009\u000b-\u001f]/g," ").replace(/\s+/g," ").trim().slice(0,max);
+ const t=clean(title,150);
+ if(!t) return null;
+ const l=clean(line,300);
+ const tags=(Array.isArray(hashtags)&&hashtags.length?hashtags:TIKTOK_DEFAULT_HASHTAGS)
+  .map(h=>"#"+String(h).replace(/[#\s]+/g,"")).filter(h=>h.length>1).filter((h,i,a)=>a.indexOf(h)===i).slice(0,8);
+ return [t,l&&l!==t?l:"",TIKTOK_CAPTION_CTA,tags.join(" ")].filter(Boolean).join("\n").slice(0,2200);
+}
+async function tiktokOwnUpload(env,user,publishId) {
+ return env.DB.prepare("SELECT entity_id,details_json,created_at FROM audit_events WHERE owner_user_id=? AND event_type='tiktok_inbox_upload' AND json_extract(details_json,'$.publish_id')=?").bind(user.id,String(publishId||"")).first();
+}
+async function tiktokSetDraftCaption(env,user,b) {
+ const up=await tiktokOwnUpload(env,user,b.publish_id);
+ if(!up) return {status:404,body:{error:"No TikTok draft with this publish_id was sent from this account"}};
+ const caption=tiktokDraftCaption(b);
+ if(!caption) return {status:422,body:{error:"title is required"}};
+ await audit(env,user.id,"tiktok_draft_caption","tiktok",String(b.publish_id),user.email,{caption});
+ return {status:200,body:{publish_id:String(b.publish_id),caption,sent_to_tiktok:false}};
+}
+async function tiktokDrafts(env,user) {
+ const {results:ups=[]}=await env.DB.prepare("SELECT entity_id,details_json,created_at FROM audit_events WHERE owner_user_id=? AND event_type='tiktok_inbox_upload' ORDER BY created_at DESC LIMIT 10").bind(user.id).all();
+ const drafts=[];
+ for(const u of ups) {
+  const d=JSON.parse(u.details_json||"{}");
+  const c=await env.DB.prepare("SELECT details_json FROM audit_events WHERE owner_user_id=? AND event_type='tiktok_draft_caption' AND entity_id=? ORDER BY created_at DESC LIMIT 1").bind(user.id,String(d.publish_id||"")).first();
+  drafts.push({key:u.entity_id,publish_id:d.publish_id||null,sent_at:u.created_at,account:d.account||null,caption:(c?JSON.parse(c.details_json||"{}").caption:d.caption)||null});
+ }
+ return {status:200,body:{drafts,note:"TikTok's inbox API cannot pre-fill captions; copy the caption and paste it in the TikTok app when you finish the draft."}};
+}
+async function tiktokInboxUpload(env,user,body,key,captionInput={}) {
  if(!/^[A-Za-z0-9_.:-]{4,80}$/.test(String(key||""))) return {status:422,body:{error:"Idempotency-Key header (4–80 chars) is required"}};
  const prior=await env.DB.prepare("SELECT details_json FROM audit_events WHERE owner_user_id=? AND event_type='tiktok_inbox_upload' AND entity_id=?").bind(user.id,key).first();
  if(prior) return {status:409,body:{error:"This Idempotency-Key was already uploaded; not sent again",previous:JSON.parse(prior.details_json||"{}")}};
@@ -229,14 +264,15 @@ async function tiktokInboxUpload(env,user,body,key) {
   return {status:502,body:{error:"TikTok init failed: "+m}};
  }
  // Record the attempt before the transfer so a retry with the same key can never send a second draft.
- await audit(env,user.id,"tiktok_inbox_upload","tiktok",key,user.email,{publish_id:ij.data.publish_id,bytes:bytes.byteLength,account:account.account_name});
+ const caption=tiktokDraftCaption(captionInput);
+ await audit(env,user.id,"tiktok_inbox_upload","tiktok",key,user.email,{publish_id:ij.data.publish_id,bytes:bytes.byteLength,account:account.account_name,...(caption?{caption}:{})});
  const put=await fetch(ij.data.upload_url,{method:"PUT",headers:{"Content-Type":"video/mp4","Content-Length":String(bytes.byteLength),"Content-Range":"bytes 0-"+(bytes.byteLength-1)+"/"+bytes.byteLength},body:bytes});
  if(!(put.status===201||put.ok)) {
   await audit(env,user.id,"tiktok_inbox_upload_failed","tiktok",key,user.email,{stage:"upload",http:put.status,publish_id:ij.data.publish_id});
   return {status:502,body:{error:"TikTok upload failed with HTTP "+put.status,publish_id:ij.data.publish_id}};
  }
  const st=await tiktokPublishStatus(env,account,ij.data.publish_id).catch(e=>({error:safeText(e?.message,200)}));
- return {status:200,body:{sent:true,mode:"inbox_draft",account:account.account_name,publish_id:ij.data.publish_id,status:st}};
+ return {status:200,body:{sent:true,mode:"inbox_draft",account:account.account_name,publish_id:ij.data.publish_id,status:st,caption,caption_prefilled:false}};
 }
 async function tiktokPublishStatus(env,account,publishId) {
  const token=await tiktokAccessToken(env,account);
@@ -1267,7 +1303,9 @@ async function handle(request,env) {
  if(sellerShop&&method==="POST"&&sellerShop[2]) { const r=await shopeeSeller.verify(env,user,sellerShop[1]); return json(r.body,r.status,cors(request)); }
  if(sellerShop&&method==="DELETE"&&!sellerShop[2]) { const r=await shopeeSeller.disconnect(env,user,sellerShop[1]); return json(r.body,r.status,cors(request)); }
  if(method==="POST"&&path==="/affiliate/shopee/connect") { const r=await connectShopeeAffiliate(env,user); return json(r.body,r.status,cors(request)); }
- if(method==="POST"&&path==="/tiktok/inbox-upload") { const r=await tiktokInboxUpload(env,user,await request.arrayBuffer(),request.headers.get("Idempotency-Key")); return json(r.body,r.status,cors(request)); }
+ if(method==="POST"&&path==="/tiktok/inbox-upload") { const q=new URL(request.url).searchParams; const r=await tiktokInboxUpload(env,user,await request.arrayBuffer(),request.headers.get("Idempotency-Key"),{title:q.get("title"),line:q.get("line")}); return json(r.body,r.status,cors(request)); }
+ if(method==="POST"&&path==="/tiktok/draft-caption") { const r=await tiktokSetDraftCaption(env,user,await request.json().catch(()=>({}))); return json(r.body,r.status,cors(request)); }
+ if(method==="GET"&&path==="/tiktok/drafts") { const r=await tiktokDrafts(env,user); return json(r.body,r.status,cors(request)); }
  if(method==="POST"&&path==="/tiktok/publish-status") {
   const b=await request.json().catch(()=>({}));
   const account=await env.DB.prepare(TIKTOK_ACCOUNT_SQL+" WHERE owner_user_id=? AND platform='tiktok' AND status='connected'").bind(user.id).first();
